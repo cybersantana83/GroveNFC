@@ -1,6 +1,6 @@
-# GroveNFC Reference Demo (AtomS3)
+# GroveNFC Reference Demo (AtomS3 + M5StickS3)
 
-Reference firmware demo for **Grove NFC module** on **M5Stack AtomS3 (current demo target)**.
+Reference firmware demo for **Grove NFC module** on **AtomS3 and M5StickS3**.
 
 This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
 
@@ -28,7 +28,7 @@ This project demonstrates one implementation path. GroveNFC capability can be ad
 
 ### Reference firmware layer (this repo)
 
-- AtomS3 UI and single-button interaction flow
+- AtomS3 / M5StickS3 UI and single-button interaction flow
 - Reader / NDEF / Emulator / Diagnose pages
 - Serial logging, heartbeat, and boot debug flow
 - NDEF read and text parsing for demo usage
@@ -36,17 +36,19 @@ This project demonstrates one implementation path. GroveNFC capability can be ad
 
 ## Hardware
 
-Current AtomS3 demo I2C pins (editable in `src/main.cpp`):
+Current board I2C pins (auto-selected in `src/main.cpp` by build target):
 
-- SDA: `GPIO2`
-- SCL: `GPIO1`
+- AtomS3: SDA `GPIO2`, SCL `GPIO1`
+- M5StickS3: SDA `GPIO9`, SCL `GPIO10`
 - I2C address: `0x48`
 
-If your AtomS3 base uses different pins, update `kSdaPin` and `kSclPin`.
+If your wiring uses different pins, update `kSdaPin` and `kSclPin`.
+
+For M5StickS3 target, firmware enables `EXT_5V` power output (`M5.Power.setExtOutput(true)`) at boot so Grove port can power external modules.
 
 ## UI and Button Control
 
-Single button: `BtnA`
+Single main button: `BtnA`
 
 ### Home page
 
@@ -56,12 +58,14 @@ Single button: `BtnA`
 ### Reader page
 
 - Auto-polls and displays detected card protocol/ID
+- Plays protocol-dependent tone after detecting a new card
 - **Single click**: force immediate scan
 - **Long press (~1s)**: go back to Home
 
 ### Read NDEF page
 
 - Auto-polls NDEF at intervals
+- Plays success tone after successful read (Wi-Fi payload uses a 3-note tone)
 - **Single click**: manual NDEF scan now
 - **Long press (~1s)**: go back to Home
 
@@ -100,13 +104,17 @@ Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
 
 1. Install PlatformIO extension in VS Code
 2. Open this project folder
-3. Build/Upload with environment: `m5stack-atoms3`
+3. Build/Upload with one environment:
+  - `m5stack-atoms3`
+  - `m5stack-sticks3`
 4. Open Serial Monitor at `115200`
 
 Example:
 
 ```bash
-pio run -t upload
+pio run -e m5stack-atoms3 -t upload
+# or
+pio run -e m5stack-sticks3 -t upload
 pio device monitor -b 115200
 ```
 

@@ -127,6 +127,8 @@ class GroveNFC {
   void writeISO15Image();
 
   TwoWire& wire_;
+
+  uint8_t slot_index_ = 0;
 };
 
 }  // namespace grove_nfc

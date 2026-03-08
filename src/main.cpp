@@ -7,8 +7,15 @@
 using namespace grove_nfc;
 
 namespace {
+#if defined(APP_TARGET_STICKS3)
+constexpr int kSdaPin = 9;
+constexpr int kSclPin = 10;
+constexpr uint8_t kEmuMenuVisibleCount = 5;
+#else
 constexpr int kSdaPin = 2;
 constexpr int kSclPin = 1;
+constexpr uint8_t kEmuMenuVisibleCount = 4;
+#endif
 constexpr uint32_t kI2CFreq = 400000;
 constexpr uint32_t kPollIntervalMs = 450;
 constexpr uint32_t kHeartbeatMs = 2000;
@@ -21,6 +28,19 @@ constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
 constexpr bool kAutoBootDebug = true;
 constexpr uint32_t kBootDebugShowMs = 2500;
+constexpr uint8_t kSpeakerVolume = 160;
+constexpr uint8_t kEmuActionCount = 2;
+#if defined(APP_TARGET_STICKS3)
+constexpr uint32_t kHoldPressMs = 520;
+constexpr uint32_t kNfcBootPowerSettleMs = 220;
+constexpr uint8_t kNfcBootRetryCount = 5;
+constexpr uint32_t kNfcBootRetryDelayMs = 140;
+#else
+constexpr uint32_t kHoldPressMs = 700;
+constexpr uint32_t kNfcBootPowerSettleMs = 80;
+constexpr uint8_t kNfcBootRetryCount = 2;
+constexpr uint32_t kNfcBootRetryDelayMs = 90;
+#endif
 
 enum class MenuPage : uint8_t {
   Reader = 0,
@@ -54,6 +74,8 @@ EmuConfigStage emu_config_stage = EmuConfigStage::None;
 bool in_home = true;
 int home_index = 0;
 int emu_menu_index = 0;
+uint8_t emu_type_cursor = 0;
+uint8_t emu_type_scroll = 0;
 uint8_t emu_slot = 0;
 grove_nfc::CardInfo last_card;
 uint32_t last_poll_ms = 0;
@@ -78,13 +100,67 @@ int32_t menu_scroll_px = 0;
 uint32_t last_nfc_health_ms = 0;
 uint32_t last_nfc_reconnect_ms = 0;
 uint32_t last_ndef_auto_ms = 0;
+uint8_t ndef_fail_count = 0;
 uint32_t last_reader_success_ms = 0;
 uint32_t last_recover_ms = 0;
 uint32_t last_diag_scroll_ms = 0;
 uint32_t last_ui_scroll_ms = 0;
 bool btn_hold_latched = false;
+bool ignore_click_after_hold = false;
+String boot_notice_line;
+bool emu_show_menu = false;
+bool ui_marquee_active = false;
+bool reader_need_first_tone = false;
 
-const MenuPage kHomeOrder[4] = {MenuPage::Diagnose, MenuPage::Reader, MenuPage::ReadNDEF, MenuPage::Emulator};
+inline bool mainButtonClicked() {
+  return M5.BtnA.wasClicked();
+}
+
+inline bool mainButtonPressedFor(uint32_t ms) {
+  return M5.BtnA.pressedFor(ms);
+}
+
+inline bool mainButtonReleased() {
+  return M5.BtnA.wasReleased();
+}
+
+void playTone(uint16_t freq, uint16_t ms) {
+  M5.Speaker.tone(freq, ms);
+}
+
+void playSuccessTone() {
+  playTone(1760, 60);
+  delay(10);
+  playTone(2093, 80);
+}
+
+void playCardTone(const String& protocol) {
+  if (protocol == "ISO14443A") {
+    playTone(1480, 70);
+  } else if (protocol == "ISO14443B") {
+    playTone(1318, 70);
+  } else if (protocol == "ISO15693") {
+    playTone(1174, 90);
+  } else if (protocol == "FeliCa") {
+    playTone(1568, 90);
+  } else {
+    playTone(1047, 80);
+  }
+}
+
+void playNdefTone(bool is_wifi) {
+  if (is_wifi) {
+    playTone(1760, 60);
+    delay(8);
+    playTone(1976, 60);
+    delay(8);
+    playTone(2349, 90);
+    return;
+  }
+  playSuccessTone();
+}
+
+const MenuPage kHomeOrder[4] = {MenuPage::Reader, MenuPage::ReadNDEF, MenuPage::Emulator, MenuPage::Diagnose};
 
 const char* pageName(MenuPage page) {
   switch (page) {
@@ -104,13 +180,13 @@ const char* pageName(MenuPage page) {
 const char* emuName(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
-      return "MF1K";
+      return "MFC1K";
     case EmuType::N213:
-      return "N213";
+      return "NTAG213";
     case EmuType::N215:
-      return "N215";
+      return "NTAG215";
     case EmuType::N216:
-      return "N216";
+      return "NTAG216";
     case EmuType::ISO14B:
       return "ISO14443B";
     case EmuType::ISO15:
@@ -120,10 +196,30 @@ const char* emuName(EmuType type) {
   }
 }
 
+const char* emuActionName(uint8_t idx) {
+  switch (idx) {
+    case 0:
+      return "Back";
+    case 1:
+      return "Type";
+    default:
+      return "";
+  }
+}
+
+const char* typeMenuLabel(uint8_t idx) {
+  const uint8_t type_count = static_cast<uint8_t>(EmuType::Count);
+  if (idx == 0) return "Back";
+  if (idx == static_cast<uint8_t>(type_count + 1)) return "Exit";
+  if (idx <= type_count) return emuName(static_cast<EmuType>(idx - 1));
+  return "";
+}
+
 void startCurrentEmulation();
 bool parseWifiNdef(const String& input, String& ssid, String& pass, String& auth);
 void stopAllModes();
 bool recoverNfc(const char* reason, bool rebegin);
+bool initNfcAtBoot();
 void goHome();
 void enterCurrentFeature();
 void runDiagnose();
@@ -167,6 +263,29 @@ const char* emuTypeShort(EmuType type) {
   }
 }
 
+String emulatorDisplayId(EmuType type, uint8_t slot) {
+  String base;
+  if (type == EmuType::MF1K) {
+    base = "645EE56A";
+  } else if (type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216) {
+    base = "04311D01174503";
+  } else if (type == EmuType::ISO14B) {
+    base = "11223344";
+  } else {
+    base = "E0070050B902C6C1";
+  }
+
+  const uint8_t tweak = slot & 0x0F;
+  const char lut[] = "0123456789ABCDEF";
+  const char c = base[base.length() - 1];
+  uint8_t v = 0;
+  if (c >= '0' && c <= '9') v = static_cast<uint8_t>(c - '0');
+  else if (c >= 'A' && c <= 'F') v = static_cast<uint8_t>(10 + c - 'A');
+  v = (v + tweak) & 0x0F;
+  base.setCharAt(base.length() - 1, lut[v]);
+  return base;
+}
+
 String marqueeText(const String& text, size_t visible_chars, uint32_t speed_ms = 180) {
   if (text.length() <= visible_chars) return text;
   const size_t n = text.length();
@@ -197,6 +316,29 @@ String formatIdText(String s) {
   s.toUpperCase();
   s.replace(":", "");
   return s;
+}
+
+uint16_t scaleColor565(uint16_t color, uint8_t scale) {
+  uint8_t r = (color >> 11) & 0x1F;
+  uint8_t g = (color >> 5) & 0x3F;
+  uint8_t b = color & 0x1F;
+  r = static_cast<uint8_t>((r * scale) / 255);
+  g = static_cast<uint8_t>((g * scale) / 255);
+  b = static_cast<uint8_t>((b * scale) / 255);
+  return (r << 11) | (g << 5) | b;
+}
+
+uint16_t breathingColor(uint16_t base, uint32_t period_ms = 1700) {
+  const uint32_t phase = millis() % period_ms;
+  const uint32_t half = period_ms / 2;
+  uint32_t ramp = 0;
+  if (phase < half) {
+    ramp = (phase * 255) / half;
+  } else {
+    ramp = ((period_ms - phase) * 255) / half;
+  }
+  const uint8_t scale = static_cast<uint8_t>(160 + (ramp * 95) / 255);
+  return scaleColor565(base, scale);
 }
 
 void drawWrappedText(lgfx::v1::LGFXBase& d,
@@ -254,71 +396,593 @@ void drawWrappedText(lgfx::v1::LGFXBase& d,
   }
 }
 
-void drawScreen() {
+void drawScreen(bool popup_only = false) {
   auto& d = M5.Display;
-  d.fillScreen(TFT_BLACK);
+  if (!popup_only) {
+    d.fillScreen(TFT_BLACK);
+  }
   d.setFont(&fonts::Font0);
   d.setTextSize(1);
 
   const int w = d.width();
+  const int h = d.height();
 
   uint16_t accent = TFT_GREEN;
   if (menu_page == MenuPage::ReadNDEF) accent = TFT_CYAN;
   if (menu_page == MenuPage::Emulator) accent = TFT_ORANGE;
   if (menu_page == MenuPage::Diagnose) accent = TFT_YELLOW;
 
-  if (in_home) {
-    d.fillTriangle(8, 64, 18, 56, 18, 72, TFT_DARKGREY);
-    d.fillTriangle(w - 8, 64, w - 18, 56, w - 18, 72, TFT_DARKGREY);
+#if defined(APP_TARGET_STICKS3)
+  if (w > h) {
+    const int header_h = 18;
+    const int content_top = header_h + 2;
+    const int content_h = h - content_top - 2;
 
-    d.drawCircle(w / 2, 50, 20, accent);
-    if (menu_page == MenuPage::Diagnose) {
-      d.drawLine(w / 2 - 10, 50, w / 2 + 10, 50, accent);
-      d.drawLine(w / 2, 40, w / 2, 60, accent);
+    auto drawHeaderBar = [&](const String& title, bool show_back) {
+      d.fillRect(0, 0, w, header_h, TFT_BLACK);
+      d.drawLine(0, header_h, w, header_h, accent);
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      d.setTextColor(accent, TFT_BLACK);
+      if (show_back) {
+        d.setCursor(2, 1);
+        d.print("<");
+      }
+      const int tw = d.textWidth(title);
+      d.setCursor((w - tw) / 2, 2);
+      d.print(title);
+    };
+
+    auto drawMenuBox = [&](int box_x, int box_y, int box_w, int box_h) {
+      d.fillRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+      d.drawRect(box_x - 2, box_y - 2, box_w + 4, box_h + 4, TFT_BLACK);
+      d.drawRect(box_x - 1, box_y - 1, box_w + 2, box_h + 2, TFT_BLACK);
+      d.drawRect(box_x, box_y, box_w, box_h, accent);
+      d.drawRect(box_x + 1, box_y + 1, box_w - 2, box_h - 2, accent);
+      d.fillRect(box_x, box_y, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + box_w - 3, box_y, 3, 3, TFT_BLACK);
+      d.fillRect(box_x, box_y + box_h - 3, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + box_w - 3, box_y + box_h - 3, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + 2, box_y + 1, 2, 2, accent);
+      d.fillRect(box_x + box_w - 4, box_y + 1, 2, 2, accent);
+      d.fillRect(box_x + 2, box_y + box_h - 3, 2, 2, accent);
+      d.fillRect(box_x + box_w - 4, box_y + box_h - 3, 2, 2, accent);
+    };
+
+    if (popup_only) {
+      if (!(menu_page == MenuPage::Emulator && emu_config_stage == EmuConfigStage::TypeMenu)) {
+        return;
+      }
+
+      const int visible_count = kEmuMenuVisibleCount;
+      const int list_count = static_cast<int>(static_cast<uint8_t>(EmuType::Count) + 2);
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      bool compact_font = false;
+      int max_text_w = d.textWidth("Back");
+      const int tw_exit = d.textWidth("Exit");
+      if (tw_exit > max_text_w) max_text_w = tw_exit;
+      for (int i = 0; i < static_cast<int>(EmuType::Count); ++i) {
+        const int tw = d.textWidth(emuName(static_cast<EmuType>(i)));
+        if (tw > max_text_w) max_text_w = tw;
+      }
+      const int box_w = min(w - 10, max(112, max_text_w + 22));
+      const int row_w = box_w - 8;
+      if (max_text_w + 8 > row_w) {
+        compact_font = true;
+        d.setFont(&fonts::Font2);
+        d.setTextSize(1);
+      }
+      const int text_h = d.fontHeight();
+      const int row_h = max(compact_font ? 14 : 18, text_h + 6);
+      const int box_h = visible_count * row_h + 8;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = content_top + (content_h - box_h) / 2;
+      drawMenuBox(box_x, box_y, box_w, box_h);
+
+      const int max_scroll = list_count - visible_count;
+      const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+      const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+      const int row_x = box_x + 4;
+
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        if (idx >= list_count) break;
+        const bool selected = (i == selected_row);
+        const int row_y = box_y + 4 + i * row_h;
+        if (selected) {
+          d.fillRect(row_x, row_y, row_w, row_h - 1, accent);
+          d.setTextColor(TFT_BLACK, accent);
+        } else {
+          d.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
+        d.setCursor(row_x + 6, text_y);
+        d.print(typeMenuLabel(static_cast<uint8_t>(idx)));
+      }
+      return;
+    }
+
+    if (in_home) {
+      d.fillScreen(TFT_BLACK);
+      d.setTextColor(breathingColor(accent), TFT_BLACK);
+      d.setTextSize(2);
+      d.setFont(&fonts::Font0);
+      const char* brand = "GroveNFC";
+      const int brand_w = d.textWidth(brand);
+      d.setCursor((w - brand_w) / 2, 2);
+      d.print(brand);
+
+      const int icon_cy = content_top + content_h / 2;
+
+      // chunky pixel arrows
+      d.fillRect(8, icon_cy - 2, 4, 4, accent);
+      d.fillRect(12, icon_cy - 6, 4, 12, accent);
+      d.fillRect(16, icon_cy - 10, 4, 20, accent);
+
+      d.fillRect(w - 12, icon_cy - 2, 4, 4, accent);
+      d.fillRect(w - 16, icon_cy - 6, 4, 12, accent);
+      d.fillRect(w - 20, icon_cy - 10, 4, 20, accent);
+
+      d.fillRect(w / 2 - 30, icon_cy - 22, 60, 44, TFT_BLACK);
+
+      if (menu_page == MenuPage::Diagnose) {
+        d.fillRect(w / 2 - 16, icon_cy - 16, 32, 30, accent);
+        d.fillRect(w / 2 - 12, icon_cy - 12, 24, 20, TFT_BLACK);
+        d.fillRect(w / 2 - 6, icon_cy - 20, 12, 6, accent);
+        d.fillRect(w / 2 - 8, icon_cy - 2, 12, 3, accent);
+        d.fillRect(w / 2 - 8, icon_cy + 4, 8, 3, accent);
+        d.fillRect(w / 2 - 2, icon_cy + 6, 3, 6, accent);
+        d.fillRect(w / 2 + 1, icon_cy + 3, 3, 3, accent);
+        d.fillRect(w / 2 + 4, icon_cy, 3, 3, accent);
+      } else if (menu_page == MenuPage::Reader) {
+        d.fillRect(w / 2 - 20, icon_cy - 8, 24, 20, accent);
+        d.fillRect(w / 2 - 16, icon_cy - 4, 16, 8, TFT_BLACK);
+        d.fillRect(w / 2 - 16, icon_cy + 6, 16, 3, accent);
+        d.fillRect(w / 2 + 8, icon_cy - 2, 3, 8, accent);
+        d.fillRect(w / 2 + 12, icon_cy - 6, 3, 16, accent);
+        d.fillRect(w / 2 + 16, icon_cy - 10, 3, 24, accent);
+      } else if (menu_page == MenuPage::ReadNDEF) {
+        d.fillRect(w / 2 - 16, icon_cy - 18, 30, 34, accent);
+        d.fillRect(w / 2 - 12, icon_cy - 14, 22, 26, TFT_BLACK);
+        d.fillRect(w / 2 + 8, icon_cy - 18, 6, 6, TFT_BLACK);
+        d.fillRect(w / 2 + 4, icon_cy - 14, 4, 2, accent);
+        d.fillRect(w / 2 - 8, icon_cy - 6, 14, 3, accent);
+        d.fillRect(w / 2 - 8, icon_cy, 14, 3, accent);
+        d.fillRect(w / 2 - 8, icon_cy + 6, 10, 3, accent);
+      } else {
+        d.fillRect(w / 2 - 22, icon_cy - 10, 16, 22, accent);
+        d.fillRect(w / 2 - 18, icon_cy - 6, 8, 10, TFT_BLACK);
+        d.fillRect(w / 2 + 6, icon_cy - 10, 16, 22, accent);
+        d.fillRect(w / 2 + 10, icon_cy - 6, 8, 10, TFT_BLACK);
+        d.fillRect(w / 2 - 2, icon_cy - 4, 6, 3, accent);
+        d.fillRect(w / 2 + 1, icon_cy - 1, 6, 3, accent);
+        d.fillRect(w / 2 - 2, icon_cy + 4, 6, 3, accent);
+      }
+
+      d.setTextColor(accent, TFT_BLACK);
+      d.setTextSize(2);
+      String home_name;
+      if (menu_page == MenuPage::Diagnose) home_name = "Diagnose";
+      else if (menu_page == MenuPage::Reader) home_name = "Reader";
+      else if (menu_page == MenuPage::ReadNDEF) home_name = "Read NDEF";
+      else home_name = "Emulator";
+      const int hw = d.textWidth(home_name);
+      d.setCursor((w - hw) / 2, h - 20);
+      d.print(home_name);
+
+      if (!boot_notice_line.isEmpty()) {
+        d.setTextSize(1);
+        d.setTextColor(TFT_RED, TFT_BLACK);
+        d.setCursor(4, h - 24);
+        d.print(boot_notice_line);
+      }
+      return;
+    }
+
+    String page_title;
+    if (menu_page == MenuPage::Reader) page_title = "Reader";
+    else if (menu_page == MenuPage::ReadNDEF) page_title = "Read NDEF";
+    else if (menu_page == MenuPage::Emulator) page_title = "Emulator";
+    else page_title = "Diagnose";
+    drawHeaderBar(page_title, true);
+
+    d.fillRect(0, content_top, w, content_h, TFT_BLACK);
+    d.setTextSize(2);
+    d.setFont(&fonts::Font0);
+
+    if (menu_page == MenuPage::Emulator && emu_config_stage == EmuConfigStage::TypeMenu) {
+      const int visible_count = kEmuMenuVisibleCount;
+      const int list_count = static_cast<int>(static_cast<uint8_t>(EmuType::Count) + 2);
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      bool compact_font = false;
+      int max_text_w = d.textWidth("Back");
+      const int tw_exit = d.textWidth("Exit");
+      if (tw_exit > max_text_w) max_text_w = tw_exit;
+      for (int i = 0; i < static_cast<int>(EmuType::Count); ++i) {
+        const int tw = d.textWidth(emuName(static_cast<EmuType>(i)));
+        if (tw > max_text_w) max_text_w = tw;
+      }
+      int box_w = min(w - 10, max(112, max_text_w + 22));
+      int row_w = box_w - 8;
+      if (max_text_w + 8 > row_w) {
+        compact_font = true;
+        d.setFont(&fonts::Font2);
+        d.setTextSize(1);
+      }
+      const int text_h = d.fontHeight();
+      const int row_h = max(compact_font ? 14 : 18, text_h + 6);
+      box_w = min(w - 10, max(112, d.textWidth("ISO14443B") + 22));
+      row_w = box_w - 8;
+      const int box_h = visible_count * row_h + 8;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = content_top + (content_h - box_h) / 2;
+      drawMenuBox(box_x, box_y, box_w, box_h);
+
+      const int max_scroll = list_count - visible_count;
+      const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+      const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+      const int row_x = box_x + 4;
+
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        if (idx >= list_count) break;
+        const bool selected = (i == selected_row);
+        const int row_y = box_y + 4 + i * row_h;
+        if (selected) {
+          d.fillRect(row_x, row_y, row_w, row_h - 1, accent);
+          d.setTextColor(TFT_BLACK, accent);
+        } else {
+          d.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
+        d.setCursor(row_x + 6, text_y);
+        d.print(typeMenuLabel(static_cast<uint8_t>(idx)));
+      }
+    } else if (menu_page == MenuPage::Emulator && emu_config_stage == EmuConfigStage::SlotMenu) {
+      const int visible_count = 3;
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      const int row_h = 18;
+      const int box_w = 96;
+      const int box_h = visible_count * row_h + 8;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = content_top + (content_h - box_h) / 2;
+      drawMenuBox(box_x, box_y, box_w, box_h);
+      const int text_h = d.fontHeight();
+
+      for (int i = 0; i < visible_count; ++i) {
+        const uint8_t slot = (emu_slot + i) % 8;
+        const bool selected = (i == 0);
+        const int row_y = box_y + 4 + i * row_h;
+        if (selected) {
+          d.fillRect(box_x + 4, row_y, box_w - 8, row_h - 1, accent);
+          d.setTextColor(TFT_BLACK, accent);
+        } else {
+          d.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
+        d.setCursor(box_x + 8, text_y);
+        d.printf("SLOT %d", slot + 1);
+      }
+    } else if (menu_page == MenuPage::Emulator && emu_show_menu) {
+      const int visible_count = kEmuMenuVisibleCount;
+      const int list_count = kEmuActionCount;
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      bool compact_font = false;
+      int max_text_w = 0;
+      for (int i = 0; i < list_count; ++i) {
+        const int tw = d.textWidth(emuActionName(i));
+        if (tw > max_text_w) max_text_w = tw;
+      }
+      int box_w = min(w - 10, max(112, max_text_w + 22));
+      int row_w = box_w - 8;
+      if (max_text_w + 8 > row_w) {
+        compact_font = true;
+        d.setFont(&fonts::Font2);
+        d.setTextSize(1);
+      }
+      const int row_h = compact_font ? 14 : 18;
+      box_w = min(w - 10, max(112, d.textWidth("ISO14443B") + 22));
+      const int box_h = visible_count * row_h + 8;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = content_top + (content_h - box_h) / 2;
+      drawMenuBox(box_x, box_y, box_w, box_h);
+
+      const int max_scroll = max(0, list_count - visible_count);
+      const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+      const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+      const int text_h = d.fontHeight();
+
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        if (idx >= list_count) break;
+        const bool selected = (i == selected_row);
+        const int row_y = box_y + 4 + i * row_h;
+        if (selected) {
+          d.fillRect(box_x + 4, row_y, box_w - 8, row_h - 1, accent);
+          d.setTextColor(TFT_BLACK, accent);
+        } else {
+          d.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
+        d.setCursor(box_x + 8, text_y);
+        d.print(emuActionName(static_cast<uint8_t>(idx)));
+      }
     } else if (menu_page == MenuPage::Reader) {
-      d.drawRect(w / 2 - 12, 40, 24, 20, accent);
-      d.fillRect(w / 2 - 8, 46, 16, 8, accent);
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(last_card.valid ? protocolFull(last_card.protocol) : "Scanning");
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      String body = last_card.valid ? formatIdText(last_card.uid) : "";
+      drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
     } else if (menu_page == MenuPage::ReadNDEF) {
-      d.drawRect(w / 2 - 10, 38, 20, 24, accent);
-      d.drawLine(w / 2 - 6, 46, w / 2 + 6, 46, accent);
-      d.drawLine(w / 2 - 6, 52, w / 2 + 6, 52, accent);
+      String title = "Scanning";
+      String body = "";
+      if (!ndef_text.isEmpty()) {
+        title = ndef_is_wifi ? "WiFi" : "Payload";
+        body = ndef_text;
+      } else if (ndef_detail.indexOf("No ISO14443A tag") < 0) {
+        title = "Read Error";
+        body = ndef_detail;
+      }
+      if (!wifi_status.isEmpty()) {
+        if (!body.isEmpty()) body += " | ";
+        body += wifi_status;
+      }
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(title);
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
+    } else if (menu_page == MenuPage::Emulator) {
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(emuName(emu_type));
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      d.setCursor(4, content_top + 20);
+      d.printf("Slot %d/8", emu_slot + 1);
+      d.setCursor(4, content_top + 38);
+      d.print(emulatorDisplayId(emu_type, emu_slot));
     } else {
-      d.drawRect(w / 2 - 11, 39, 22, 22, accent);
-      d.drawRect(w / 2 - 5, 33, 10, 4, accent);
-      d.drawRect(w / 2 - 5, 63, 10, 4, accent);
+      String head = diagnose_ok ? "DIAG PASS" : "DIAG CHECK";
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(head);
+
+      String hw_line = "HW 0x" + String(hw_ver, HEX);
+      String fw_line = "FW 0x" + String(fw_ver, HEX);
+      hw_line.toUpperCase();
+      fw_line.toUpperCase();
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      d.setCursor(4, content_top + 20);
+      d.print(hw_line);
+      d.setCursor(76, content_top + 20);
+      d.print(fw_line);
+
+      String line = diagnose_report;
+      line.replace('\n', ' ');
+      drawWrappedText(d, 4, content_top + 38, w - 8, 18, 2, 12, line, TFT_WHITE, TFT_BLACK);
+    }
+
+    if (wifi_popup) {
+      const int box_w = w - 10;
+      const int box_h = h - 20;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = (h - box_h) / 2;
+      d.fillRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+      d.drawRect(box_x, box_y, box_w, box_h, TFT_CYAN);
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      d.setCursor(box_x + 6, box_y + 8);
+      d.print("WIFI?");
+      drawWrappedText(d, box_x + 6, box_y + 22, box_w - 12, 12, 2, 6, wifi_ssid, TFT_WHITE, TFT_BLACK);
+      d.setCursor(box_x + 6, box_y + box_h - 14);
+      d.print("CLICK NO   HOLD YES");
+    }
+    return;
+  }
+#endif
+
+  if (popup_only) {
+    if (!(menu_page == MenuPage::Emulator && emu_config_stage == EmuConfigStage::TypeMenu)) {
+      return;
     }
 
     d.setTextSize(2);
+    d.setFont(&fonts::Font0);
+    bool compact_font = false;
+
+    const int item_count = 4;
+    int max_text_w = 0;
+    const EmuType items[6] = {EmuType::MF1K, EmuType::N213, EmuType::N215, EmuType::N216, EmuType::ISO14B, EmuType::ISO15};
+    for (int i = 0; i < 6; ++i) {
+      const int tw = d.textWidth(emuName(items[i]));
+      if (tw > max_text_w) max_text_w = tw;
+    }
+
+    const int max_sel_w_limit = (w - 20) - 16;
+    if (max_text_w + 10 > max_sel_w_limit) {
+      compact_font = true;
+      d.setTextSize(1);
+      d.setFont(&fonts::Font2);
+      max_text_w = 0;
+      for (int i = 0; i < 6; ++i) {
+        const int tw = d.textWidth(emuName(items[i]));
+        if (tw > max_text_w) max_text_w = tw;
+      }
+    }
+
+    const int row_h = compact_font ? 18 : 20;
+    const int sel_w = min(max_sel_w_limit, max_text_w + 10);
+    const int box_w = min(w - 20, max(80, sel_w + 16));
+    const int box_h = item_count * row_h + 12;
+    const int box_x = (w - box_w) / 2;
+    const int box_y = 24 + (104 - box_h) / 2;
+
+    d.fillRect(box_x - 3, box_y - 3, box_w + 6, box_h + 6, TFT_BLACK);
+    d.fillRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+    d.drawRect(box_x - 2, box_y - 2, box_w + 4, box_h + 4, TFT_BLACK);
+    d.drawRect(box_x - 1, box_y - 1, box_w + 2, box_h + 2, TFT_BLACK);
+    d.drawRect(box_x, box_y, box_w, box_h, accent);
+    d.drawRect(box_x + 1, box_y + 1, box_w - 2, box_h - 2, accent);
+    d.fillRect(box_x, box_y, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + box_w - 3, box_y, 3, 3, TFT_BLACK);
+    d.fillRect(box_x, box_y + box_h - 3, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + box_w - 3, box_y + box_h - 3, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + 2, box_y + 1, 2, 2, accent);
+    d.fillRect(box_x + box_w - 4, box_y + 1, 2, 2, accent);
+    d.fillRect(box_x + 2, box_y + box_h - 3, 2, 2, accent);
+    d.fillRect(box_x + box_w - 4, box_y + box_h - 3, 2, 2, accent);
+
+    const int list_count = 6;
+    const int visible_count = 4;
+    const int max_scroll = list_count - visible_count;
+    const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+    const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+
+    const int scroll_w = 4;
+    const int scroll_gap = 3;
+    const int row_x = box_x + 4;
+    const int row_w = box_w - 8 - scroll_w - scroll_gap;
+    const int text_h = d.fontHeight();
+
+    for (int i = 0; i < visible_count; ++i) {
+      const EmuType item = items[scroll_start + i];
+      const bool selected = (i == selected_row);
+      const int row_y = box_y + 6 + i * row_h;
+      const int text_y = row_y + max(0, ((row_h - 2) - text_h) / 2);
+      if (selected) {
+        d.fillRect(row_x, row_y, row_w, row_h - 2, accent);
+        d.setTextColor(TFT_BLACK, accent);
+      } else {
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+      }
+      d.setCursor(row_x + 6, text_y);
+      d.print(emuName(item));
+    }
+
+    const int track_x = box_x + box_w - scroll_w - 2;
+    const int track_y = box_y + 7;
+    const int track_h = row_h * visible_count - 2;
+    d.drawRect(track_x, track_y, scroll_w, track_h, TFT_DARKGREY);
+    const int thumb_h = max(6, ((track_h - 2) * visible_count) / list_count);
+    int thumb_y = track_y + 1;
+    if (max_scroll > 0) {
+      const int safe_scroll = max(1, max_scroll);
+      thumb_y += ((track_h - 2 - thumb_h) * scroll_start) / safe_scroll;
+    }
+    d.fillRect(track_x + 1, thumb_y, scroll_w - 2, thumb_h, accent);
+    return;
+  }
+
+  if (in_home) {
+    d.setTextColor(breathingColor(accent), TFT_BLACK);
+    d.setTextSize(2);
+    const char* brand = "GroveNFC";
+    int brand_w = d.textWidth(brand);
+    d.setCursor((w - brand_w) / 2, 1);
+    d.print(brand);
+    d.fillRect(0, 19, w, 109, TFT_BLACK);
+    
+    // chunky pixel arrows (4x4 blocks)
+    d.fillRect(8, 66, 4, 4, accent);
+    d.fillRect(12, 62, 4, 12, accent);
+    d.fillRect(16, 58, 4, 20, accent);
+
+    d.fillRect(w - 12, 66, 4, 4, accent);
+    d.fillRect(w - 16, 62, 4, 12, accent);
+    d.fillRect(w - 20, 58, 4, 20, accent);
+
+    d.fillRect(w / 2 - 30, 29, 60, 56, TFT_BLACK);
+
+    if (menu_page == MenuPage::Diagnose) {
+      // Diagnose: clipboard + check mark
+      d.fillRect(w / 2 - 16, 40, 32, 34, accent);
+      d.fillRect(w / 2 - 12, 44, 24, 24, TFT_BLACK);
+      d.fillRect(w / 2 - 6, 36, 12, 6, accent);
+      d.fillRect(w / 2 - 8, 50, 12, 3, accent);
+      d.fillRect(w / 2 - 8, 56, 8, 3, accent);
+      d.fillRect(w / 2 - 2, 58, 3, 6, accent);
+      d.fillRect(w / 2 + 1, 55, 3, 3, accent);
+      d.fillRect(w / 2 + 4, 52, 3, 3, accent);
+    } else if (menu_page == MenuPage::Reader) {
+      // Reader: scanner panel + inbound NFC waves
+      d.fillRect(w / 2 - 20, 48, 24, 20, accent);
+      d.fillRect(w / 2 - 16, 52, 16, 8, TFT_BLACK);
+      d.fillRect(w / 2 - 16, 62, 16, 3, accent);
+      d.fillRect(w / 2 + 8, 54, 3, 8, accent);
+      d.fillRect(w / 2 + 12, 50, 3, 16, accent);
+      d.fillRect(w / 2 + 16, 46, 3, 24, accent);
+      d.fillRect(w / 2 + 20, 50, 3, 16, accent);
+    } else if (menu_page == MenuPage::ReadNDEF) {
+      // NDEF: tag/document with folded corner + lines
+      d.fillRect(w / 2 - 16, 38, 30, 36, accent);
+      d.fillRect(w / 2 - 12, 42, 22, 28, TFT_BLACK);
+      d.fillRect(w / 2 + 8, 38, 6, 6, TFT_BLACK);
+      d.fillRect(w / 2 + 4, 42, 4, 2, accent);
+      d.fillRect(w / 2 - 8, 50, 14, 3, accent);
+      d.fillRect(w / 2 - 8, 56, 14, 3, accent);
+      d.fillRect(w / 2 - 8, 62, 10, 3, accent);
+      d.fillRect(w / 2 - 8, 68, 8, 3, accent);
+    } else {
+      // Emulator: source card + clone card + transfer arrows
+      d.fillRect(w / 2 - 22, 46, 16, 22, accent);
+      d.fillRect(w / 2 - 18, 50, 8, 10, TFT_BLACK);
+      d.fillRect(w / 2 + 6, 46, 16, 22, accent);
+      d.fillRect(w / 2 + 10, 50, 8, 10, TFT_BLACK);
+      d.fillRect(w / 2 - 2, 52, 6, 3, accent);
+      d.fillRect(w / 2 + 1, 55, 6, 3, accent);
+      d.fillRect(w / 2 - 2, 60, 6, 3, accent);
+      d.fillRect(w / 2 - 5, 57, 3, 3, accent);
+      d.fillRect(w / 2 + 7, 57, 3, 3, accent);
+    }
+
+    d.setTextSize(2);
+    d.setFont(&fonts::Font0);
     d.setTextColor(accent, TFT_BLACK);
     String home_name;
     if (menu_page == MenuPage::Diagnose) home_name = "Diagnose";
     else if (menu_page == MenuPage::Reader) home_name = "Reader";
     else if (menu_page == MenuPage::ReadNDEF) home_name = "NDEF";
     else home_name = "Emulator";
-    d.setCursor(20, 92);
+    d.fillRect(0, 94, w, 22, TFT_BLACK);
+    const int home_name_w = d.textWidth(home_name);
+    const int home_name_x = (w - home_name_w) / 2;
+    d.setCursor(home_name_x, 98);
     d.print(home_name);
 
-    d.setTextSize(1);
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(20, 114);
-    d.print("Click Next / Hold Enter");
+    if (!boot_notice_line.isEmpty()) {
+      d.setTextSize(1);
+      d.setTextColor(TFT_RED, TFT_BLACK);
+      d.setCursor(4, 118);
+      d.print(boot_notice_line);
+    }
     return;
   }
 
   String title_line;
   String sub_title_line;
   String body_line;
+  String emu_slot_line;
+  String emu_id_line;
   if (menu_page == MenuPage::Reader) {
+    sub_title_line = "Reader";
     title_line = last_card.valid ? String(protocolFull(last_card.protocol)) : String("Scanning");
     body_line = last_card.valid ? formatIdText(last_card.uid) : "";
   } else if (menu_page == MenuPage::ReadNDEF) {
-    title_line = ndef_is_wifi ? "NDEF WIFI" : "NDEF";
+    sub_title_line = "NDEF";
+    title_line = "Scanning";
     if (!ndef_text.isEmpty()) {
+      title_line = ndef_is_wifi ? "WiFi" : "Payload";
       body_line = ndef_text;
     } else {
       if (ndef_detail.indexOf("No ISO14443A tag") >= 0) {
-        body_line = "Scanning";
+        title_line = "Scanning";
+        body_line = "";
       } else {
+        title_line = "Read Error";
         body_line = ndef_detail;
       }
     }
@@ -327,53 +991,65 @@ void drawScreen() {
       body_line += wifi_status;
     }
   } else if (menu_page == MenuPage::Emulator) {
+    sub_title_line = "Emulator";
     title_line = String(emuName(emu_type));
-    sub_title_line = "Slot " + String(emu_slot + 1) + "/8";
-    if (emu_type == EmuType::MF1K) {
-      body_line = formatIdText("64:5E:E5:6A");
-    } else if (emu_type == EmuType::N213) {
-      body_line = formatIdText("04:31:1D:01:17:45:03");
-    } else if (emu_type == EmuType::N215) {
-      body_line = formatIdText("04:31:1D:01:17:45:03");
-    } else if (emu_type == EmuType::N216) {
-      body_line = formatIdText("04:31:1D:01:17:45:03");
-    } else if (emu_type == EmuType::ISO14B) {
-      body_line = formatIdText("11:22:33:44");
-    } else {
-      body_line = formatIdText("E0:07:00:50:B9:02:C6:C1");
-    }
+    String emu_id = emulatorDisplayId(emu_type, emu_slot);
+    emu_slot_line = String("Slot ") + String(emu_slot + 1) + "/8";
+    emu_id_line = emu_id;
+    body_line = emu_slot_line + " " + emu_id_line;
   } else {
+    sub_title_line = "Diagnose";
     title_line = diagnose_ok ? "DIAG PASS" : "DIAG CHECK";
     body_line = "HW 0x" + String(hw_ver, HEX) + " FW 0x" + String(fw_ver, HEX) + " " + diagnose_report;
   }
 
-  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF || menu_page == MenuPage::Emulator)) {
+  ui_marquee_active = false;
+  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
     body_line.replace('\n', ' ');
-    body_line = marqueeText(body_line, 18, 220);
+    ui_marquee_active = body_line.length() > 18;
+    if (ui_marquee_active) {
+      body_line = marqueeText(body_line, 18, 220);
+    }
   }
+
+  d.fillRect(0, 0, w, 22, TFT_BLACK);
+  d.drawLine(0, 22, w, 22, accent);
 
   d.setTextSize(2);
   d.setFont(&fonts::Font0);
-  d.setCursor(8, 28);
+  d.setCursor(2, 2);
+  d.setTextColor(accent, TFT_BLACK);
+  d.print("<");
+  const int sub_w = d.textWidth(sub_title_line);
+  const int header_left = 14;
+  const int header_width = w - header_left;
+  d.setCursor(header_left + (header_width - sub_w) / 2, 2);
+  d.print(sub_title_line);
+
+  d.setTextSize(2);
+  d.setFont(&fonts::Font0);
+  d.setCursor(4, 26);
   d.setTextColor(accent, TFT_BLACK);
   d.print(title_line);
 
   int body_y = 54;
-  if (!sub_title_line.isEmpty()) {
-    d.setTextSize(1);
-    d.setCursor(8, 48);
-    d.print(sub_title_line);
-    body_y = 64;
-  }
 
   if (menu_page == MenuPage::Reader) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
-    drawWrappedText(d, 8, body_y, w - 16, 18, 3, 12, body_line, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 4, body_y, w - 8, 18, 4, 12, body_line, TFT_WHITE, TFT_BLACK);
   } else if (menu_page == MenuPage::ReadNDEF) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
-    drawWrappedText(d, 8, body_y, w - 16, 18, 3, 12, body_line, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 4, body_y, w - 8, 18, 4, 12, body_line, TFT_WHITE, TFT_BLACK);
+  } else if (menu_page == MenuPage::Emulator) {
+    d.setFont(&fonts::Font0);
+    d.setTextSize(2);
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setCursor(4, body_y);
+    d.print(emu_slot_line);
+    d.setCursor(4, body_y + 18);
+    d.print(emu_id_line);
   } else if (menu_page == MenuPage::Diagnose) {
     d.setFont(&fonts::Font2);
     d.setTextSize(1);
@@ -383,8 +1059,8 @@ void drawScreen() {
     String fw_line = "FW 0x" + String(fw_ver, HEX);
     fw_line.toUpperCase();
 
-    drawWrappedText(d, 8, 52, w - 16, 14, 1, 8, hw_line, TFT_WHITE, TFT_BLACK);
-    drawWrappedText(d, 8, 66, w - 16, 14, 1, 8, fw_line, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 4, 46, w - 8, 14, 1, 8, hw_line, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 4, 60, w - 8, 14, 1, 8, fw_line, TFT_WHITE, TFT_BLACK);
 
     String report_lines[10];
     int report_count = 0;
@@ -400,91 +1076,246 @@ void drawScreen() {
       pos = static_cast<size_t>(end) + 1;
     }
 
-    d.fillRect(6, 78, w - 12, 44, TFT_BLACK);
+    d.fillRect(2, 74, w - 4, 52, TFT_BLACK);
     const int visible = 3;
     int start = 0;
     if (report_count > visible && diagnose_ok) {
       start = (millis() / kDiagScrollMs) % (report_count - visible + 1);
     }
     for (int i = 0; i < visible && start + i < report_count; ++i) {
-      drawWrappedText(d, 8, 80 + i * 14, w - 16, 14, 1, 8, report_lines[start + i], TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, 76 + i * 16, w - 8, 14, 1, 8, report_lines[start + i], TFT_WHITE, TFT_BLACK);
     }
   } else {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
-    drawWrappedText(d, 8, body_y, w - 16, 18, 3, 12, body_line, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 4, body_y, w - 8, 18, 4, 12, body_line, TFT_WHITE, TFT_BLACK);
   }
   d.setFont(&fonts::Font0);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
 
   if (menu_page == MenuPage::Emulator) {
-    if (emu_config_stage == EmuConfigStage::None) {
-      const char* items[4] = {"Back to home", "Start Emulation", "Select Type", "Select Slot"};
-      d.fillRoundRect(5, 19, 118, 109, 8, TFT_DARKGREY);
-      d.fillRoundRect(7, 21, 114, 105, 8, TFT_BLACK);
-      d.drawRoundRect(7, 21, 114, 105, 8, accent);
+    if (emu_config_stage == EmuConfigStage::None && emu_show_menu) {
+      const int list_count = kEmuActionCount;
+      const int visible_count = kEmuMenuVisibleCount;
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      bool compact_font = false;
 
-      d.setTextSize(1);
-      d.setTextColor(accent, TFT_BLACK);
-      d.setCursor(14, 30);
-      d.print("Emulator Menu");
-      for (int i = 0; i < 4; ++i) {
-        const bool selected = (i == emu_menu_index);
-        const int y = 52 + i * 15;
+      int max_text_w = 0;
+      {
+        for (int i = 0; i < list_count; ++i) {
+          const int tw_item = d.textWidth(emuActionName(i));
+          if (tw_item > max_text_w) max_text_w = tw_item;
+        }
+      }
+
+      const int max_sel_w_limit = (w - 20) - 16;
+      if (max_text_w + 10 > max_sel_w_limit) {
+        compact_font = true;
+        d.setFont(&fonts::Font2);
+        d.setTextSize(1);
+        max_text_w = 0;
+        for (int i = 0; i < list_count; ++i) {
+          const int tw_item = d.textWidth(emuActionName(i));
+          if (tw_item > max_text_w) max_text_w = tw_item;
+        }
+      }
+
+      const int row_h = compact_font ? 18 : 20;
+      const int item_count = visible_count;
+      const int sel_w = min(max_sel_w_limit, max_text_w + 10);
+      const int box_w = min(w - 20, max(80, sel_w + 16));
+      const int box_h = item_count * row_h + 12;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = 24 + (104 - box_h) / 2;
+
+      d.fillRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+      d.drawRect(box_x - 2, box_y - 2, box_w + 4, box_h + 4, TFT_BLACK);
+      d.drawRect(box_x - 1, box_y - 1, box_w + 2, box_h + 2, TFT_BLACK);
+      d.drawRect(box_x, box_y, box_w, box_h, accent);
+      d.drawRect(box_x + 1, box_y + 1, box_w - 2, box_h - 2, accent);
+      // pixel rounded corners + bigger corner dots
+      d.fillRect(box_x, box_y, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + box_w - 3, box_y, 3, 3, TFT_BLACK);
+      d.fillRect(box_x, box_y + box_h - 3, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + box_w - 3, box_y + box_h - 3, 3, 3, TFT_BLACK);
+      d.fillRect(box_x + 2, box_y + 1, 2, 2, accent);
+      d.fillRect(box_x + box_w - 4, box_y + 1, 2, 2, accent);
+      d.fillRect(box_x + 2, box_y + box_h - 3, 2, 2, accent);
+      d.fillRect(box_x + box_w - 4, box_y + box_h - 3, 2, 2, accent);
+
+      const int max_scroll = list_count - visible_count;
+      const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+      const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+      const int scroll_w = 4;
+      const int scroll_gap = 3;
+
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        String label = emuActionName(static_cast<uint8_t>(idx));
+        const bool selected = (i == selected_row);
+        const int row_y = box_y + 6 + i * row_h;
+        const int row_x = box_x + 4;
+        const int row_w = box_w - 8 - scroll_w - scroll_gap;
+        const int text_h = d.fontHeight();
+        const int text_y = row_y + max(0, ((row_h - 2) - text_h) / 2);
         if (selected) {
-          d.fillRoundRect(12, y - 2, 104, 13, 4, accent);
+          d.fillRect(row_x, row_y, row_w, row_h - 2, accent);
           d.setTextColor(TFT_BLACK, accent);
         } else {
           d.setTextColor(TFT_WHITE, TFT_BLACK);
         }
-        d.setCursor(16, y);
-        d.print(items[i]);
+        d.setCursor(row_x + 6, text_y);
+        d.print(label);
       }
+
+      const int track_x = box_x + box_w - scroll_w - 2;
+      const int track_y = box_y + 7;
+      const int track_h = row_h * visible_count - 2;
+      d.drawRect(track_x, track_y, scroll_w, track_h, TFT_DARKGREY);
+      const int thumb_h = max(6, ((track_h - 2) * visible_count) / list_count);
+      int thumb_y = track_y + 1;
+      if (max_scroll > 0) {
+        const int safe_scroll = max(1, max_scroll);
+        thumb_y += ((track_h - 2 - thumb_h) * scroll_start) / safe_scroll;
+      }
+      d.fillRect(track_x + 1, thumb_y, scroll_w - 2, thumb_h, accent);
       return;
     }
   }
 
   if (menu_page == MenuPage::Emulator && emu_config_stage != EmuConfigStage::None) {
-    d.fillRoundRect(5, 19, 118, 109, 8, TFT_DARKGREY);
-    d.fillRoundRect(7, 21, 114, 105, 8, TFT_BLACK);
-    d.drawRoundRect(7, 21, 114, 105, 8, accent);
-
-    d.setTextSize(1);
+    d.setTextSize(2);
     d.setFont(&fonts::Font0);
-    d.setTextColor(accent, TFT_BLACK);
-    d.setCursor(14, 30);
-    d.print(emu_config_stage == EmuConfigStage::TypeMenu ? "Select Type" : "Select Slot");
+    bool compact_font = false;
+
+    const int item_count = 4;
+    int max_text_w = 0;
+    if (emu_config_stage == EmuConfigStage::TypeMenu) {
+      const int tw_back = d.textWidth("Back");
+      if (tw_back > max_text_w) max_text_w = tw_back;
+      const int tw_exit = d.textWidth("Exit");
+      if (tw_exit > max_text_w) max_text_w = tw_exit;
+      for (int i = 0; i < static_cast<int>(EmuType::Count); ++i) {
+        const int tw = d.textWidth(emuName(static_cast<EmuType>(i)));
+        if (tw > max_text_w) max_text_w = tw;
+      }
+    } else {
+      for (int i = 0; i < 8; ++i) {
+        const uint8_t slot = i;
+        String label = "SLOT ";
+        label += String(slot + 1);
+        const int tw = d.textWidth(label);
+        if (tw > max_text_w) max_text_w = tw;
+      }
+    }
+
+    const int max_sel_w_limit = (w - 20) - 16;
+    if (max_text_w + 10 > max_sel_w_limit) {
+      compact_font = true;
+      d.setTextSize(1);
+      d.setFont(&fonts::Font2);
+      max_text_w = 0;
+      if (emu_config_stage == EmuConfigStage::TypeMenu) {
+        const int tw_back = d.textWidth("Back");
+        if (tw_back > max_text_w) max_text_w = tw_back;
+        const int tw_exit = d.textWidth("Exit");
+        if (tw_exit > max_text_w) max_text_w = tw_exit;
+        for (int i = 0; i < static_cast<int>(EmuType::Count); ++i) {
+          const int tw = d.textWidth(emuName(static_cast<EmuType>(i)));
+          if (tw > max_text_w) max_text_w = tw;
+        }
+      } else {
+        for (int i = 0; i < 8; ++i) {
+          const uint8_t slot = i;
+          String label = "SLOT ";
+          label += String(slot + 1);
+          const int tw = d.textWidth(label);
+          if (tw > max_text_w) max_text_w = tw;
+        }
+      }
+    }
+
+    const int text_h_menu = d.fontHeight();
+    const int row_h = max(compact_font ? 18 : 20, text_h_menu + 6);
+
+    const int sel_w = min(max_sel_w_limit, max_text_w + 10);
+    const int box_w = min(w - 20, max(80, sel_w + 16));
+    const int box_h = item_count * row_h + 12;
+    const int box_x = (w - box_w) / 2;
+    const int box_y = 24 + (104 - box_h) / 2;
+
+    d.fillRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+    d.drawRect(box_x - 2, box_y - 2, box_w + 4, box_h + 4, TFT_BLACK);
+    d.drawRect(box_x - 1, box_y - 1, box_w + 2, box_h + 2, TFT_BLACK);
+    d.drawRect(box_x, box_y, box_w, box_h, accent);
+    d.drawRect(box_x + 1, box_y + 1, box_w - 2, box_h - 2, accent);
+    // pixel rounded corners + bigger corner dots
+    d.fillRect(box_x, box_y, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + box_w - 3, box_y, 3, 3, TFT_BLACK);
+    d.fillRect(box_x, box_y + box_h - 3, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + box_w - 3, box_y + box_h - 3, 3, 3, TFT_BLACK);
+    d.fillRect(box_x + 2, box_y + 1, 2, 2, accent);
+    d.fillRect(box_x + box_w - 4, box_y + 1, 2, 2, accent);
+    d.fillRect(box_x + 2, box_y + box_h - 3, 2, 2, accent);
+    d.fillRect(box_x + box_w - 4, box_y + box_h - 3, 2, 2, accent);
 
     if (emu_config_stage == EmuConfigStage::TypeMenu) {
-      const EmuType items[6] = {EmuType::MF1K, EmuType::N213, EmuType::N215, EmuType::N216, EmuType::ISO14B, EmuType::ISO15};
-      d.setTextSize(1);
-      const int selected_idx = static_cast<int>(emu_menu_type);
-      for (int i = 0; i < 4; ++i) {
-        const EmuType item = items[(selected_idx + i) % 6];
-        const bool selected = (i == 0);
-        const int y = 52 + i * 15;
+      const int list_count = static_cast<int>(static_cast<uint8_t>(EmuType::Count) + 2);
+      const int visible_count = 4;
+      const int max_scroll = list_count - visible_count;
+      const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
+      const int selected_row = min(static_cast<int>(emu_type_cursor), visible_count - 1);
+
+      const int scroll_w = 4;
+      const int scroll_gap = 3;
+      const int row_x = box_x + 4;
+      const int row_w = box_w - 8 - scroll_w - scroll_gap;
+      const int text_h = d.fontHeight();
+
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        if (idx >= list_count) break;
+        const bool selected = (i == selected_row);
+        const int row_y = box_y + 6 + i * row_h;
+        const int text_y = row_y + max(0, ((row_h - 2) - text_h) / 2);
         if (selected) {
-          d.fillRoundRect(12, y - 2, 104, 13, 4, accent);
+          d.fillRect(row_x, row_y, row_w, row_h - 2, accent);
           d.setTextColor(TFT_BLACK, accent);
         } else {
           d.setTextColor(TFT_WHITE, TFT_BLACK);
         }
-        d.setCursor(16, y);
-        d.print(emuName(item));
+        d.setCursor(row_x + 6, text_y);
+        d.print(typeMenuLabel(static_cast<uint8_t>(idx)));
       }
+
+      const int track_x = box_x + box_w - scroll_w - 2;
+      const int track_y = box_y + 7;
+      const int track_h = row_h * visible_count - 2;
+      d.drawRect(track_x, track_y, scroll_w, track_h, TFT_DARKGREY);
+      const int thumb_h = max(6, ((track_h - 2) * visible_count) / list_count);
+      int thumb_y = track_y + 1;
+      if (max_scroll > 0) {
+        const int safe_scroll = max(1, max_scroll);
+        thumb_y += ((track_h - 2 - thumb_h) * scroll_start) / safe_scroll;
+      }
+      d.fillRect(track_x + 1, thumb_y, scroll_w - 2, thumb_h, accent);
     } else {
-      d.setTextSize(1);
       for (int i = 0; i < 4; ++i) {
         const uint8_t slot = (emu_slot + i) % 8;
         const bool selected = (i == 0);
-        const int y = 52 + i * 15;
+        const int row_y = box_y + 6 + i * row_h;
+        const int row_x = box_x + 4;
+        const int row_w = box_w - 8;
+        const int text_h = d.fontHeight();
+        const int text_y = row_y + max(0, ((row_h - 2) - text_h) / 2);
         if (selected) {
-          d.fillRoundRect(12, y - 2, 104, 13, 4, accent);
+          d.fillRect(row_x, row_y, row_w, row_h - 2, accent);
           d.setTextColor(TFT_BLACK, accent);
         } else {
           d.setTextColor(TFT_WHITE, TFT_BLACK);
         }
-        d.setCursor(16, y);
+        d.setCursor(row_x + 6, text_y);
         d.print("SLOT ");
         d.print(slot + 1);
       }
@@ -495,17 +1326,17 @@ void drawScreen() {
   }
 
   if (wifi_popup) {
-    d.fillRoundRect(5, 19, 118, 109, 8, TFT_DARKGREY);
-    d.fillRoundRect(7, 21, 114, 105, 8, TFT_BLACK);
-    d.drawRoundRect(7, 21, 114, 105, 8, TFT_CYAN);
+    d.fillRoundRect(2, 16, w - 4, 110, 5, TFT_DARKGREY);
+    d.fillRoundRect(4, 18, w - 8, 106, 5, TFT_BLACK);
+    d.drawRoundRect(4, 18, w - 8, 106, 5, TFT_CYAN);
     d.setTextColor(TFT_WHITE, TFT_BLACK);
     d.setTextSize(2);
-    d.setFont(&fonts::Font0);
-    d.setCursor(14, 30);
+    d.setFont(&fonts::Font2);
+    d.setCursor(10, 26);
     d.print("WIFI?");
-    drawWrappedText(d, 14, 56, 100, 16, 3, 12, wifi_ssid, TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, 10, 52, w - 20, 16, 3, 12, wifi_ssid, TFT_WHITE, TFT_BLACK);
     d.setTextSize(1);
-    d.setCursor(14, 112);
+    d.setCursor(10, 112);
     d.print("CLICK NO  HOLD YES");
     d.setTextColor(TFT_WHITE, TFT_BLACK);
   }
@@ -534,6 +1365,30 @@ bool recoverNfc(const char* reason, bool rebegin) {
   return true;
 }
 
+bool initNfcAtBoot() {
+  delay(kNfcBootPowerSettleMs);
+
+  for (uint8_t attempt = 1; attempt <= kNfcBootRetryCount; ++attempt) {
+    const bool ok = nfc.begin();
+    if (ok) {
+      if (attempt > 1) {
+        Serial.printf("[BOOT] NFC init recovered on attempt %u/%u\n", attempt, kNfcBootRetryCount);
+      }
+      return true;
+    }
+
+    Serial.printf("[BOOT] NFC init attempt %u/%u failed\n", attempt, kNfcBootRetryCount);
+    delay(kNfcBootRetryDelayMs);
+
+#if defined(APP_TARGET_STICKS3)
+    Wire.begin(kSdaPin, kSclPin, kI2CFreq);
+    delay(5);
+#endif
+  }
+
+  return false;
+}
+
 void stopAllModes() {
   nfc.stopRF();
   emu_started = false;
@@ -543,12 +1398,14 @@ void goHome() {
   in_home = true;
   wifi_popup = false;
   emu_config_stage = EmuConfigStage::None;
+  emu_show_menu = false;
   menu_page = kHomeOrder[home_index];
   drawScreen();
 }
 
 void enterCurrentFeature() {
   in_home = false;
+  boot_notice_line = "";
   wifi_popup = false;
   emu_config_stage = EmuConfigStage::None;
 
@@ -557,6 +1414,7 @@ void enterCurrentFeature() {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Scanning";
+    reader_need_first_tone = true;
     last_poll_ms = 0;
   } else if (menu_page == MenuPage::ReadNDEF) {
     ndef_text = "";
@@ -565,7 +1423,14 @@ void enterCurrentFeature() {
     wifi_status = "";
     last_ndef_auto_ms = 0;
   } else if (menu_page == MenuPage::Emulator) {
-    emu_menu_index = 0;
+    emu_type = EmuType::N213;
+    emu_slot = 0;
+    emu_menu_index = 1;
+    emu_show_menu = false;
+    if (nfc_ready) {
+      startCurrentEmulation();
+      emu_menu_index = 1;
+    }
   } else if (menu_page == MenuPage::Diagnose) {
     runDiagnose();
     return;
@@ -585,6 +1450,7 @@ void enterMenu(MenuPage mode) {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Waiting card...";
+    reader_need_first_tone = true;
   }
 
   if (menu_page == MenuPage::ReadNDEF) {
@@ -598,9 +1464,11 @@ void enterMenu(MenuPage mode) {
   if (menu_page == MenuPage::Emulator && nfc_ready) {
     emu_config_stage = EmuConfigStage::None;
     emu_menu_type = emu_type;
-    emu_menu_index = 0;
+    emu_menu_index = 1;
+    emu_show_menu = false;
   } else {
     emu_config_stage = EmuConfigStage::None;
+    emu_show_menu = false;
   }
 
   drawScreen();
@@ -651,8 +1519,11 @@ void autoScanNdef() {
   const bool ok = nfc.readNdef(text, detail);
 
   if (!ok) {
-    if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0) {
+    ndef_fail_count++;
+    if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0 || detail.indexOf("error") >= 0 ||
+        detail.indexOf("fail") >= 0 || detail.indexOf("timeout") >= 0 || ndef_fail_count >= 3) {
       recoverNfc("NDEF read abnormal", true);
+      ndef_fail_count = 0;
     }
     if (!ndef_text.isEmpty() || ndef_detail != detail) {
       ndef_text = "";
@@ -665,6 +1536,7 @@ void autoScanNdef() {
   }
 
   const bool changed = (text != ndef_text);
+  ndef_fail_count = 0;
   ndef_text = text;
   ndef_detail = detail;
   String auth;
@@ -673,6 +1545,7 @@ void autoScanNdef() {
 
   if (changed) {
     if (ndef_is_wifi) wifi_popup = true;
+    playNdefTone(ndef_is_wifi);
     drawScreen();
     Serial.printf("[NDEF] %s\n", ndef_text.c_str());
   }
@@ -701,30 +1574,101 @@ void runBootDebugFlow() {
   menu_page = MenuPage::Diagnose;
   diagnose_ok = false;
   diagnose_report = "Boot debug running...";
-  drawScreen();
+
+  auto& d = M5.Display;
+  d.fillScreen(TFT_BLACK);
+  d.setFont(&fonts::Font2);
+  d.setTextSize(1);
+
+  constexpr int kBootStoreLines = 16;
+  const int kBootTop = 2;
+  const int display_h = static_cast<int>(d.height());
+  const int kBootLineH = d.fontHeight() + 2;
+  const int kBootVisibleLinesRaw = (display_h - kBootTop - 2) / kBootLineH;
+  const int kBootVisibleLines = (kBootVisibleLinesRaw < 3) ? 3 : kBootVisibleLinesRaw;
+  String boot_lines[kBootStoreLines];
+  uint16_t boot_colors[kBootStoreLines];
+  int boot_count = 0;
+
+  auto renderBootLog = [&]() {
+    d.fillScreen(TFT_BLACK);
+    const int start = max(0, boot_count - kBootVisibleLines);
+    for (int i = start; i < boot_count; ++i) {
+      const int row = i - start;
+      d.setTextColor(boot_colors[i], TFT_BLACK);
+      d.setCursor(2, kBootTop + row * kBootLineH);
+      d.print(boot_lines[i]);
+    }
+  };
+
+  auto pushBootLog = [&](const String& line, uint16_t color, uint16_t wait_ms) {
+    if (boot_count >= kBootStoreLines) {
+      for (int i = 1; i < kBootStoreLines; ++i) {
+        boot_lines[i - 1] = boot_lines[i];
+        boot_colors[i - 1] = boot_colors[i];
+      }
+      boot_count = kBootStoreLines - 1;
+    }
+    boot_lines[boot_count] = line;
+    boot_colors[boot_count] = color;
+    ++boot_count;
+    renderBootLog();
+    delay(wait_ms);
+  };
+
+  pushBootLog("[BOOT] GroveNFC init", TFT_GREEN, 120);
+  pushBootLog("[BOOT] I2C @400k", TFT_GREEN, 90);
 
   Serial.println("[BOOT] Auto debug start");
   if (!nfc_ready) {
     diagnose_ok = false;
     diagnose_report = "I2C/NFC not ready";
+    boot_notice_line = "DIAG FAIL: NFC NOT READY";
     Serial.println("[BOOT] NFC not ready");
-    drawScreen();
-    delay(kBootDebugShowMs);
+    pushBootLog("NFC not ready [FAIL]", TFT_RED, 220);
+    pushBootLog("[BOOT] Enter menu", TFT_YELLOW, 1000);
     boot_debug_running = false;
+    goHome();
     return;
   }
+
+  pushBootLog("NFC online [OK]", TFT_GREEN, 100);
+  String hw_line = "[BOOT] HW=0x" + String(hw_ver, HEX);
+  hw_line.toUpperCase();
+  pushBootLog(hw_line, TFT_WHITE, 90);
+  String fw_line = "[BOOT] FW=0x" + String(fw_ver, HEX);
+  fw_line.toUpperCase();
+  pushBootLog(fw_line, TFT_WHITE, 90);
 
   diagnose_ok = nfc.selfCheck(diagnose_report);
   hw_ver = nfc.hardwareVersion();
   fw_ver = nfc.firmwareVersion();
   Serial.printf("[BOOT] DIAG: %s\n%s\n", diagnose_ok ? "PASS" : "FAIL", diagnose_report.c_str());
 
+  pushBootLog(diagnose_ok ? "Self-check pass [OK]" : "Self-check fail [FAIL]",
+              diagnose_ok ? TFT_GREEN : TFT_RED,
+              170);
+
+  size_t diag_pos = 0;
+  while (diag_pos < diagnose_report.length()) {
+    int end = diagnose_report.indexOf('\n', diag_pos);
+    if (end < 0) end = diagnose_report.length();
+    String item = diagnose_report.substring(diag_pos, end);
+    item.trim();
+    if (!item.isEmpty()) {
+      pushBootLog(String(" - ") + item, TFT_WHITE, 70);
+    }
+    diag_pos = static_cast<size_t>(end) + 1;
+  }
+
   CardInfo boot_card;
   if (nfc.readAny(boot_card)) {
     Serial.printf("[BOOT] CARD: %s UID=%s\n", boot_card.protocol.c_str(), boot_card.uid.c_str());
     last_card = boot_card;
+    pushBootLog("[BOOT] CARD " + boot_card.protocol, TFT_GREEN, 100);
   } else {
     Serial.println("[BOOT] CARD: none");
+    pushBootLog("[BOOT] CARD none", TFT_WHITE, 80);
   }
 
   String boot_ndef;
@@ -733,17 +1677,18 @@ void runBootDebugFlow() {
     Serial.printf("[BOOT] NDEF: %s\n", boot_ndef.c_str());
     ndef_text = boot_ndef;
     ndef_detail = boot_ndef_detail;
+    pushBootLog("[BOOT] NDEF found", TFT_GREEN, 100);
   } else {
     Serial.printf("[BOOT] NDEF: %s\n", boot_ndef_detail.c_str());
+    pushBootLog("[BOOT] NDEF none", TFT_WHITE, 80);
   }
 
   diagnose_report = diagnose_ok ? "Boot check done" : "Boot check fail";
-  drawScreen();
-  delay(kBootDebugShowMs);
+  boot_notice_line = diagnose_ok ? "" : "DIAG FAIL: HOLD CHECK";
+  pushBootLog("[BOOT] Enter menu", TFT_YELLOW, 1000);
+
   boot_debug_running = false;
-  if (diagnose_ok) {
-    enterMenu(MenuPage::Reader);
-  }
+  goHome();
   Serial.println("[BOOT] Auto debug done");
 }
 
@@ -784,8 +1729,11 @@ void scanNdefNow() {
   String detail;
   String text;
   if (!nfc.readNdef(text, detail)) {
-    if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0) {
+    ndef_fail_count++;
+    if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0 || detail.indexOf("error") >= 0 ||
+        detail.indexOf("fail") >= 0 || detail.indexOf("timeout") >= 0 || ndef_fail_count >= 2) {
       recoverNfc("NDEF manual read abnormal", true);
+      ndef_fail_count = 0;
     }
     ndef_text = "";
     ndef_detail = detail;
@@ -796,6 +1744,7 @@ void scanNdefNow() {
   }
 
   ndef_text = text;
+  ndef_fail_count = 0;
   ndef_detail = detail;
   wifi_status = "";
   String auth;
@@ -804,6 +1753,7 @@ void scanNdefNow() {
   if (ndef_is_wifi) {
     wifi_popup = true;
   }
+  playNdefTone(ndef_is_wifi);
   drawScreen();
   Serial.printf("[NDEF] %s\n", ndef_text.c_str());
 }
@@ -881,6 +1831,7 @@ void maintainNfcConnection() {
       last_card.protocol = "None";
       last_card.uid = "";
       last_card.detail = "Waiting card...";
+        reader_need_first_tone = true;
     }
     Serial.printf("[NFC] Reconnected HW=0x%04X FW=0x%04X\n", hw_ver, fw_ver);
     drawScreen();
@@ -896,8 +1847,18 @@ void handleReader() {
   CardInfo card;
   if (nfc.readAny(card)) {
     last_reader_success_ms = now;
+    bool first_tone_played = false;
+    if (reader_need_first_tone) {
+      playSuccessTone();
+      reader_need_first_tone = false;
+      first_tone_played = true;
+      Serial.printf("[CARD] First tone armed -> protocol=%s uid=%s\n", card.protocol.c_str(), card.uid.c_str());
+    }
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
+      if (!first_tone_played) {
+        playCardTone(card.protocol);
+      }
       drawScreen();
       Serial.printf("[CARD] %s UID=%s\n", card.protocol.c_str(), card.uid.c_str());
     }
@@ -917,14 +1878,35 @@ void handleReader() {
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
+#if defined(APP_TARGET_STICKS3)
+  M5.Power.setExtOutput(true);
+#endif
+  M5.Speaker.setVolume(kSpeakerVolume);
 
   Serial.begin(115200);
+  const char* target_name = "Unknown";
+#if defined(APP_TARGET_STICKS3)
+  target_name = "M5StickS3";
+#elif defined(APP_TARGET_ATOMS3)
+  target_name = "AtomS3";
+#endif
+  Serial.printf("[BOOT] Target=%s SDA=GPIO%d SCL=GPIO%d I2C=0x%02X\n",
+                target_name,
+                kSdaPin,
+                kSclPin,
+                grove_nfc::I2C_SLAVE_ADDR);
   Wire.begin(kSdaPin, kSclPin, kI2CFreq);
 
-  M5.Display.setRotation(0);
+    M5.Display.setRotation(
+  #if defined(APP_TARGET_STICKS3)
+    1
+  #else
+    0
+  #endif
+    );
   M5.Display.setFont(&fonts::Font0);
 
-  nfc_ready = nfc.begin();
+  nfc_ready = initNfcAtBoot();
   hw_ver = nfc.hardwareVersion();
   fw_ver = nfc.firmwareVersion();
   last_card.protocol = "None";
@@ -938,13 +1920,22 @@ void setup() {
 
 void loop() {
   M5.update();
-  if (M5.BtnA.wasReleased()) {
+  const bool clicked_raw = mainButtonClicked();
+  const bool released = mainButtonReleased();
+  bool clicked = clicked_raw;
+  if (clicked && ignore_click_after_hold) {
+    clicked = false;
+    ignore_click_after_hold = false;
+  } else if (released && ignore_click_after_hold) {
+    ignore_click_after_hold = false;
+  }
+  if (released) {
     btn_hold_latched = false;
   }
   emitHeartbeat();
   maintainNfcConnection();
   autoScanNdef();
-  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF || menu_page == MenuPage::Emulator)) {
+  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF) && ui_marquee_active) {
     const uint32_t now = millis();
     if (now - last_ui_scroll_ms >= kUiScrollMs) {
       last_ui_scroll_ms = now;
@@ -960,13 +1951,14 @@ void loop() {
   }
 
   if (wifi_popup) {
-    if (M5.BtnA.wasClicked()) {
+    if (clicked) {
       wifi_popup = false;
       wifi_status = "Cancelled";
       drawScreen();
     }
-    if (M5.BtnA.pressedFor(700) && !btn_hold_latched) {
+    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
       btn_hold_latched = true;
+      ignore_click_after_hold = true;
       connectWifiNow();
     }
     delay(10);
@@ -974,13 +1966,14 @@ void loop() {
   }
 
   if (in_home) {
-    if (M5.BtnA.wasClicked()) {
+    if (clicked) {
       home_index = (home_index + 1) % 4;
       menu_page = kHomeOrder[home_index];
       drawScreen();
     }
-    if (M5.BtnA.pressedFor(1000) && !btn_hold_latched) {
+    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
       btn_hold_latched = true;
+      ignore_click_after_hold = true;
       enterCurrentFeature();
     }
     delay(10);
@@ -989,49 +1982,92 @@ void loop() {
 
   if (menu_page == MenuPage::Emulator) {
     if (emu_config_stage == EmuConfigStage::TypeMenu) {
-      if (M5.BtnA.wasClicked()) {
-        emu_menu_type = static_cast<EmuType>((static_cast<uint8_t>(emu_menu_type) + 1) % static_cast<uint8_t>(EmuType::Count));
-        drawScreen();
-      }
-      if (M5.BtnA.pressedFor(1000) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        emu_type = emu_menu_type;
-        emu_config_stage = EmuConfigStage::None;
-        drawScreen();
-      }
-    } else if (emu_config_stage == EmuConfigStage::SlotMenu) {
-      if (M5.BtnA.wasClicked()) {
-        emu_slot = (emu_slot + 1) % 8;
-        drawScreen();
-      }
-      if (M5.BtnA.pressedFor(1000) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        emu_config_stage = EmuConfigStage::None;
-        drawScreen();
-      }
-    } else {
-      if (M5.BtnA.wasClicked()) {
-        emu_menu_index = (emu_menu_index + 1) % 4;
-        drawScreen();
-      }
-      if (M5.BtnA.pressedFor(1000) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        if (emu_menu_index == 0) {
-          goHome();
-        } else if (emu_menu_index == 1) {
-          startCurrentEmulation();
-        } else if (emu_menu_index == 2) {
-          emu_menu_type = emu_type;
-          emu_config_stage = EmuConfigStage::TypeMenu;
-          drawScreen();
+      if (clicked) {
+        const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
+        const uint8_t visible_count = kEmuMenuVisibleCount;
+        uint8_t selected = emu_type_scroll + emu_type_cursor;
+        if (selected + 1 < list_count) {
+          if (emu_type_cursor + 1 < visible_count) {
+            emu_type_cursor++;
+          } else {
+            emu_type_scroll++;
+          }
+          selected = emu_type_scroll + emu_type_cursor;
+          if (selected > 0 && selected < list_count - 1) {
+            emu_menu_type = static_cast<EmuType>(selected - 1);
+          }
         } else {
-          emu_config_stage = EmuConfigStage::SlotMenu;
+          emu_type_scroll = 0;
+          emu_type_cursor = 0;
+          emu_menu_type = emu_type;
+        }
+        if (selected > 0 && selected < list_count - 1) {
+          emu_type = emu_menu_type;
+          emu_slot = 0;
+          if (nfc_ready) startCurrentEmulation();
+        }
+        drawScreen(true);
+      }
+      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+        const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
+        const uint8_t selected = emu_type_scroll + emu_type_cursor;
+        if (selected == 0) {
+          emu_config_stage = EmuConfigStage::None;
+          emu_show_menu = false;
+          drawScreen();
+        } else if (selected == list_count - 1) {
+          goHome();
+        } else {
+          emu_type = emu_menu_type;
+          emu_slot = 0;
+          if (nfc_ready) startCurrentEmulation();
+          emu_config_stage = EmuConfigStage::None;
+          emu_show_menu = false;
           drawScreen();
         }
       }
+    } else if (emu_config_stage == EmuConfigStage::SlotMenu) {
+      if (clicked) {
+        emu_slot = (emu_slot + 1) % 8;
+        if (nfc_ready) startCurrentEmulation();
+        drawScreen();
+      }
+      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+        emu_config_stage = EmuConfigStage::None;
+        if (nfc_ready) startCurrentEmulation();
+        emu_show_menu = false;
+        drawScreen();
+      }
+    } else {
+      if (clicked) {
+        emu_slot = (emu_slot + 1) % 8;
+        if (nfc_ready) startCurrentEmulation();
+        drawScreen();
+      }
+      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+        const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
+        const uint8_t selected_idx = static_cast<uint8_t>(emu_type) + 1;
+        uint8_t scroll = 0;
+        if (list_count > kEmuMenuVisibleCount) {
+          const uint8_t max_scroll = list_count - kEmuMenuVisibleCount;
+          scroll = min(selected_idx, max_scroll);
+        }
+        emu_type_scroll = scroll;
+        emu_type_cursor = selected_idx - emu_type_scroll;
+        emu_menu_type = emu_type;
+        emu_config_stage = EmuConfigStage::TypeMenu;
+        emu_show_menu = false;
+        drawScreen();
+      }
     }
   } else {
-    if (M5.BtnA.wasClicked()) {
+    if (clicked) {
       if (menu_page == MenuPage::Reader) {
         last_poll_ms = 0;
       } else if (menu_page == MenuPage::ReadNDEF) {
@@ -1040,8 +2076,9 @@ void loop() {
         runDiagnose();
       }
     }
-    if (M5.BtnA.pressedFor(1000) && !btn_hold_latched) {
+    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
       btn_hold_latched = true;
+      ignore_click_after_hold = true;
       goHome();
     }
   }

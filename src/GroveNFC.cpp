@@ -6,7 +6,9 @@ namespace {
 constexpr uint16_t kTagAddrNtag213 = 0x0000;
 constexpr uint16_t kTagAddrISO15 = 0x7000;
 constexpr uint16_t kTagAddr14B = 0x0000;
-constexpr uint16_t kTagAddrMifare1k = 0x0000;
+constexpr uint16_t kTagAddrNtag215 = 0x1000;
+constexpr uint16_t kTagAddrNtag216 = 0x2000;
+constexpr uint16_t kTagAddrMifare1k = 0x3000;
 
 const uint8_t kNtag213Header[] = {
     0x04, 0x31, 0x1D, 0xA0,
@@ -55,6 +57,10 @@ const uint8_t kISO15TagHeader[] = {
     0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00,
 };
+
+uint8_t applyLowNibbleSlot(uint8_t value, uint8_t slot) {
+  return static_cast<uint8_t>((value & 0xF0) | (((value & 0x0F) + (slot & 0x0F)) & 0x0F));
+}
 
 }  // namespace
 
@@ -146,10 +152,12 @@ bool GroveNFC::recover() {
 }
 
 bool GroveNFC::setSlot(uint8_t slot) {
-  return writeMiscReg(I2cMiscReg_SetSlot_Addr, slot & 0x07);
+  slot_index_ = slot & 0x07;
+  return writeMiscReg(I2cMiscReg_SetSlot_Addr, slot_index_);
 }
 
 bool GroveNFC::startEmulationMifare1K() {
+  writeMifare1KImage();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -159,6 +167,7 @@ bool GroveNFC::startEmulationMifare1K() {
 }
 
 bool GroveNFC::startEmulationNtag213() {
+  writeNtag213Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -168,19 +177,21 @@ bool GroveNFC::startEmulationNtag213() {
 }
 
 bool GroveNFC::startEmulationNtag215() {
+  writeNtag215Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag213);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag215);
   delay(5);
   return writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NTAG215);
 }
 
 bool GroveNFC::startEmulationNtag216() {
+  writeNtag216Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag213);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag216);
   delay(5);
   return writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NTAG216);
 }
@@ -195,6 +206,7 @@ bool GroveNFC::startEmulationChinaII() {
 }
 
 bool GroveNFC::startEmulationISO15() {
+  writeISO15Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -700,44 +712,61 @@ String GroveNFC::bytesToHex(const uint8_t* data, size_t len, bool reverse) {
 }
 
 void GroveNFC::writeNtag213Image() {
+  uint8_t header[sizeof(kNtag213Header)] = {0};
+  memcpy(header, kNtag213Header, sizeof(header));
+  header[7] = applyLowNibbleSlot(header[7], slot_index_);
+
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
   writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag213);
   delay(2);
-  writeData(I2cEpromReg_Addr, kNtag213Header, sizeof(kNtag213Header));
+  writeData(I2cEpromReg_Addr, header, sizeof(header));
   delay(2);
   writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
   delay(250);
 }
 
 void GroveNFC::writeNtag215Image() {
+  uint8_t header[sizeof(kNtag215Header)] = {0};
+  memcpy(header, kNtag215Header, sizeof(header));
+  header[7] = applyLowNibbleSlot(header[7], slot_index_);
+
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag213);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag215);
   delay(2);
-  writeData(I2cEpromReg_Addr, kNtag215Header, sizeof(kNtag215Header));
+  writeData(I2cEpromReg_Addr, header, sizeof(header));
   delay(2);
   writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
   delay(250);
 }
 
 void GroveNFC::writeNtag216Image() {
+  uint8_t header[sizeof(kNtag216Header)] = {0};
+  memcpy(header, kNtag216Header, sizeof(header));
+  header[7] = applyLowNibbleSlot(header[7], slot_index_);
+
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag213);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrNtag216);
   delay(2);
-  writeData(I2cEpromReg_Addr, kNtag216Header, sizeof(kNtag216Header));
+  writeData(I2cEpromReg_Addr, header, sizeof(header));
   delay(2);
   writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
   delay(250);
 }
 
 void GroveNFC::writeMifare1KImage() {
+  uint8_t header[sizeof(kMifareOne4B1KHeader)] = {0};
+  memcpy(header, kMifareOne4B1KHeader, sizeof(header));
+  header[3] = applyLowNibbleSlot(header[3], slot_index_);
+  header[4] = header[0] ^ header[1] ^ header[2] ^ header[3];
+
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
   writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k);
   delay(2);
-  writeData(I2cEpromReg_Addr, kMifareOne4B1KHeader, sizeof(kMifareOne4B1KHeader));
+  writeData(I2cEpromReg_Addr, header, sizeof(header));
   delay(2);
   for (uint16_t sector = 1; sector < 16; ++sector) {
     writeData(I2cEpromReg_Addr + (sector << 6), kMifareOne1KData, sizeof(kMifareOne1KData));
@@ -748,11 +777,15 @@ void GroveNFC::writeMifare1KImage() {
 }
 
 void GroveNFC::writeISO15Image() {
+  uint8_t header[sizeof(kISO15TagHeader)] = {0};
+  memcpy(header, kISO15TagHeader, sizeof(header));
+  header[0] = applyLowNibbleSlot(header[0], slot_index_);
+
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
   writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrISO15);
   delay(2);
-  writeData(I2cEpromReg_Addr, kISO15TagHeader, sizeof(kISO15TagHeader));
+  writeData(I2cEpromReg_Addr, header, sizeof(header));
   delay(2);
   writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
   delay(250);
