@@ -1,6 +1,6 @@
-# GroveNFC Reference Demo (AtomS3 + M5StickS3)
+# GroveNFC Reference Demo (AtomS3 + M5Stick Series)
 
-Reference firmware demo for **Grove NFC module** on **AtomS3 and M5StickS3**.
+Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus1.1 / M5StickC Plus2**.
 
 This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
 
@@ -40,7 +40,16 @@ Current board I2C pins (auto-selected in `src/main.cpp` by build target):
 
 - AtomS3: SDA `GPIO2`, SCL `GPIO1`
 - M5StickS3: SDA `GPIO9`, SCL `GPIO10`
+- M5StickC Plus1.1 / Plus2: SDA `GPIO32`, SCL `GPIO33`
 - I2C address: `0x48`
+
+Pin mapping note:
+
+- AtomS3 Grove `G1/G2` corresponds to StickC Grove `G33/G32` (thus `SCL=33`, `SDA=32`).
+
+Audio note:
+
+- M5StickC Plus1.1 / Plus2 use **PWM buzzer** (no full speaker path).
 
 If your wiring uses different pins, update `kSdaPin` and `kSclPin`.
 
@@ -107,6 +116,8 @@ Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
 3. Build/Upload with one environment:
   - `m5stack-atoms3`
   - `m5stack-sticks3`
+  - `m5stack-stickcplus`
+  - `m5stack-stickcplus2`
 4. Open Serial Monitor at `115200`
 
 Example:
@@ -115,6 +126,10 @@ Example:
 pio run -e m5stack-atoms3 -t upload
 # or
 pio run -e m5stack-sticks3 -t upload
+# or
+pio run -e m5stack-stickcplus -t upload
+# or
+pio run -e m5stack-stickcplus2 -t upload
 pio device monitor -b 115200
 ```
 
