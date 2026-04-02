@@ -23,11 +23,18 @@ constexpr uint8_t kEmuMenuVisibleCount = 4;
 #endif
 constexpr uint32_t kI2CFreq = 400000;
 #if defined(APP_TARGET_STICKS3)
-constexpr uint32_t kPollIntervalMs = 180;
+constexpr uint32_t kPollIntervalMs = 120;
 #elif defined(APP_TARGET_STICKCPLUS)
-constexpr uint32_t kPollIntervalMs = 220;
+constexpr uint32_t kPollIntervalMs = 140;
 #else
-constexpr uint32_t kPollIntervalMs = 320;
+constexpr uint32_t kPollIntervalMs = 220;
+#endif
+#if defined(APP_TARGET_STICKS3)
+constexpr uint32_t kReaderHoldCheckMs = 650;
+#elif defined(APP_TARGET_STICKCPLUS)
+constexpr uint32_t kReaderHoldCheckMs = 700;
+#else
+constexpr uint32_t kReaderHoldCheckMs = 900;
 #endif
 constexpr uint32_t kHeartbeatMs = 2000;
 constexpr uint32_t kNfcHealthCheckMs = 3000;
@@ -78,6 +85,7 @@ enum class EmuType : uint8_t {
   N215,
   N216,
   ISO14B,
+  Felica,
   ISO15,
   Count
 };
@@ -147,6 +155,9 @@ String boot_notice_line;
 bool emu_show_menu = false;
 bool ui_marquee_active = false;
 bool reader_need_first_tone = false;
+bool reader_14b_only = false;
+uint32_t reader_last_hold_log_ms = 0;
+uint8_t reader_fail_streak = 0;
 Preferences prefs;
 PianoStage piano_stage = PianoStage::Menu;
 uint8_t piano_menu_index = 0;
@@ -245,6 +256,8 @@ const char* emuName(EmuType type) {
       return "NTAG216";
     case EmuType::ISO14B:
       return "ISO14443B";
+    case EmuType::Felica:
+      return "Felica";
     case EmuType::ISO15:
       return "ISO15693";
     default:
@@ -319,6 +332,8 @@ const char* emuTypeShort(EmuType type) {
       return "N216";
     case EmuType::ISO14B:
       return "14B";
+    case EmuType::Felica:
+      return "FLC";
     case EmuType::ISO15:
       return "15";
     default:
@@ -334,6 +349,8 @@ String emulatorDisplayId(EmuType type, uint8_t slot) {
     base = "04311D01174503";
   } else if (type == EmuType::ISO14B) {
     base = "11223344";
+  } else if (type == EmuType::Felica) {
+    base = "010106010E0F3F00";
   } else {
     base = "E0070050B902C6C1";
   }
@@ -379,6 +396,39 @@ String formatIdText(String s) {
   s.toUpperCase();
   s.replace(":", "");
   return s;
+}
+
+String readerBodyText(const grove_nfc::CardInfo& card) {
+  if (!card.valid) return "";
+  if (card.protocol == "FeliCa" && !card.detail.isEmpty()) {
+    return card.detail;
+  }
+  return formatIdText(card.uid);
+}
+
+String protocolTag(const String& protocol) {
+  if (protocol == "ISO14443A") return "14A";
+  if (protocol == "ISO14443B") return "14B";
+  if (protocol == "ISO15693") return "15";
+  if (protocol == "FeliCa") return "FEL";
+  return protocol;
+}
+
+String normalizeDetailForLog(String detail) {
+  detail.replace("\r", " ");
+  detail.replace("\n", " | ");
+  while (detail.indexOf("  ") >= 0) detail.replace("  ", " ");
+  detail.trim();
+  return detail;
+}
+
+String formatCardLogLine(const grove_nfc::CardInfo& card) {
+  String line = "[CARD][" + protocolTag(card.protocol) + "] UID=" + card.uid;
+  const String detail = normalizeDetailForLog(card.detail);
+  if (!detail.isEmpty()) {
+    line += " | " + detail;
+  }
+  return line;
 }
 
 uint8_t pianoMappedCount() {
@@ -997,7 +1047,7 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(4, content_top + 2);
       d.print(last_card.valid ? protocolFull(last_card.protocol) : "Scanning");
       d.setTextColor(TFT_WHITE, TFT_BLACK);
-      String body = last_card.valid ? formatIdText(last_card.uid) : "";
+      String body = readerBodyText(last_card);
       drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
     } else if (menu_page == MenuPage::ReadNDEF) {
       String title = "Scanning";
@@ -1026,7 +1076,8 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(4, content_top + 20);
       d.printf("Slot %d/8", emu_slot + 1);
       d.setCursor(4, content_top + 38);
-      d.print(emulatorDisplayId(emu_type, emu_slot));
+      if (emu_type == EmuType::Felica && !emu_started) d.print("Not supported");
+      else d.print(emulatorDisplayId(emu_type, emu_slot));
     } else if (menu_page == MenuPage::Piano) {
       d.setTextColor(accent, TFT_BLACK);
       d.setCursor(4, content_top + 2);
@@ -1105,8 +1156,9 @@ void drawScreen(bool popup_only = false) {
 
     const int item_count = 4;
     int max_text_w = 0;
-    const EmuType items[6] = {EmuType::MF1K, EmuType::N213, EmuType::N215, EmuType::N216, EmuType::ISO14B, EmuType::ISO15};
-    for (int i = 0; i < 6; ++i) {
+    const EmuType items[] = {EmuType::MF1K, EmuType::N213, EmuType::N215, EmuType::N216, EmuType::ISO14B, EmuType::Felica, EmuType::ISO15};
+    const int list_count = sizeof(items) / sizeof(items[0]);
+    for (int i = 0; i < list_count; ++i) {
       const int tw = d.textWidth(emuName(items[i]));
       if (tw > max_text_w) max_text_w = tw;
     }
@@ -1117,7 +1169,7 @@ void drawScreen(bool popup_only = false) {
       d.setTextSize(1);
       d.setFont(&fonts::Font2);
       max_text_w = 0;
-      for (int i = 0; i < 6; ++i) {
+      for (int i = 0; i < list_count; ++i) {
         const int tw = d.textWidth(emuName(items[i]));
         if (tw > max_text_w) max_text_w = tw;
       }
@@ -1145,7 +1197,6 @@ void drawScreen(bool popup_only = false) {
     d.fillRect(box_x + 2, box_y + box_h - 3, 2, 2, accent);
     d.fillRect(box_x + box_w - 4, box_y + box_h - 3, 2, 2, accent);
 
-    const int list_count = 6;
     const int visible_count = 4;
     const int max_scroll = list_count - visible_count;
     const int scroll_start = min(static_cast<int>(emu_type_scroll), max_scroll);
@@ -1279,8 +1330,19 @@ void drawScreen(bool popup_only = false) {
   String emu_id_line;
   if (menu_page == MenuPage::Reader) {
     sub_title_line = "Reader";
-    title_line = last_card.valid ? String(protocolFull(last_card.protocol)) : String("Scanning");
-    body_line = last_card.valid ? formatIdText(last_card.uid) : "";
+    if (last_card.valid) {
+      title_line = String(protocolFull(last_card.protocol));
+    } else {
+      title_line = reader_14b_only ? String("Scan 14B") : String("Scanning");
+    }
+    body_line = readerBodyText(last_card);
+    if (!reader_14b_only) {
+      if (body_line.isEmpty()) body_line = "Mode: AUTO";
+      else body_line += "  AUTO";
+    } else {
+      if (body_line.isEmpty()) body_line = "Mode: 14B ONLY";
+      else body_line += "  14B";
+    }
   } else if (menu_page == MenuPage::ReadNDEF) {
     sub_title_line = "NDEF";
     title_line = "Scanning";
@@ -1303,7 +1365,7 @@ void drawScreen(bool popup_only = false) {
   } else if (menu_page == MenuPage::Emulator) {
     sub_title_line = "Emulator";
     title_line = String(emuName(emu_type));
-    String emu_id = emulatorDisplayId(emu_type, emu_slot);
+    String emu_id = (emu_type == EmuType::Felica && !emu_started) ? String("Not supported") : emulatorDisplayId(emu_type, emu_slot);
     emu_slot_line = String("Slot ") + String(emu_slot + 1) + "/8";
     emu_id_line = emu_id;
     body_line = emu_slot_line + " " + emu_id_line;
@@ -1679,7 +1741,9 @@ bool recoverNfc(const char* reason, bool rebegin) {
   if (now - last_recover_ms < kRecoverCooldownMs) return false;
   last_recover_ms = now;
 
-  Serial.printf("[NFC] Recover: %s\n", reason);
+  if (reason && reason[0] != '\0') {
+    Serial.printf("[NFC] Recover: %s\n", reason);
+  }
   bool ok = nfc.recover();
   if (ok && rebegin) {
     ok = nfc.begin();
@@ -1745,6 +1809,9 @@ void enterCurrentFeature() {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Scanning";
+    reader_14b_only = false;
+    reader_last_hold_log_ms = 0;
+    reader_fail_streak = 0;
     reader_need_first_tone = true;
     last_poll_ms = 0;
   } else if (menu_page == MenuPage::ReadNDEF) {
@@ -1790,6 +1857,9 @@ void enterMenu(MenuPage mode) {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Waiting card...";
+    reader_14b_only = false;
+    reader_last_hold_log_ms = 0;
+    reader_fail_streak = 0;
     reader_need_first_tone = true;
   }
 
@@ -1838,6 +1908,8 @@ void startCurrentEmulation() {
     ok = nfc.startEmulationNtag216();
   } else if (emu_type == EmuType::ISO14B) {
     ok = nfc.startEmulationChinaII();
+  } else if (emu_type == EmuType::Felica) {
+    ok = nfc.startEmulationFelica();
   } else if (emu_type == EmuType::ISO15) {
     ok = nfc.startEmulationISO15();
   }
@@ -2132,17 +2204,6 @@ void emitHeartbeat() {
   const uint32_t now = millis();
   if (now - last_heartbeat_ms < kHeartbeatMs) return;
   last_heartbeat_ms = now;
-
-  const String card_info = last_card.valid ? (last_card.protocol + "/" + last_card.uid) : "none";
-  const String wifi_info = wifi_status.isEmpty() ? "idle" : wifi_status;
-  Serial.printf("[HB] page=%s nfc=%d emu=%d diag=%d bootdbg=%d wifi=%s card=%s\n",
-                pageName(menu_page),
-                nfc_ready ? 1 : 0,
-                emu_started ? 1 : 0,
-                diagnose_ok ? 1 : 0,
-                boot_debug_running ? 1 : 0,
-                wifi_info.c_str(),
-                card_info.c_str());
 }
 
 void maintainNfcConnection() {
@@ -2162,7 +2223,7 @@ void maintainNfcConnection() {
       Serial.println("[NFC] Lost connection, waiting reconnect");
       drawScreen();
     } else if (menu_page == MenuPage::Reader && now - last_reader_success_ms > kReaderRecoverMs) {
-      recoverNfc("Reader idle timeout", true);
+      recoverNfc(nullptr, true);
     }
     return;
   }
@@ -2190,11 +2251,14 @@ void maintainNfcConnection() {
 void handleReader() {
   if (!nfc_ready) return;
   const uint32_t now = millis();
-  if (now - last_poll_ms < kPollIntervalMs) return;
+  const uint32_t poll_interval = last_card.valid ? kReaderHoldCheckMs : kPollIntervalMs;
+  if (now - last_poll_ms < poll_interval) return;
   last_poll_ms = now;
 
   CardInfo card;
-  if (nfc.readAny(card)) {
+  const bool got_card = reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card);
+  if (got_card) {
+    reader_fail_streak = 0;
     last_reader_success_ms = now;
     bool first_tone_played = false;
     if (reader_need_first_tone) {
@@ -2205,7 +2269,7 @@ void handleReader() {
 #endif
       reader_need_first_tone = false;
       first_tone_played = true;
-      Serial.printf("[CARD] First tone armed -> protocol=%s uid=%s\n", card.protocol.c_str(), card.uid.c_str());
+      Serial.printf("[CARD][TONE] First detect -> %s\n", formatCardLogLine(card).c_str());
     }
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
@@ -2213,9 +2277,21 @@ void handleReader() {
         playCardTone(card.protocol);
       }
       drawScreen();
-      Serial.printf("[CARD] %s UID=%s\n", card.protocol.c_str(), card.uid.c_str());
+      Serial.println(formatCardLogLine(card));
+      reader_last_hold_log_ms = now;
+    } else if (reader_14b_only && card.protocol == "ISO14443B" && now - reader_last_hold_log_ms >= 2000) {
+      Serial.printf("[CARD][14B][HOLD] UID=%s\n", card.uid.c_str());
+      reader_last_hold_log_ms = now;
     }
   } else {
+    if (reader_fail_streak < 0xFF) ++reader_fail_streak;
+    if (reader_14b_only && reader_fail_streak >= 8) {
+      Serial.println("[READER] 14B fail streak -> auto recover");
+      recoverNfc("Reader 14B fail streak", true);
+      reader_fail_streak = 0;
+      last_poll_ms = 0;
+      return;
+    }
     if (last_card.valid && now - last_reader_success_ms > 1200) {
       recoverNfc("Reader stuck after tag", true);
     }
@@ -2561,7 +2637,17 @@ void loop() {
   } else {
     if (clicked) {
       if (menu_page == MenuPage::Reader) {
+        reader_14b_only = !reader_14b_only;
+        last_card.valid = false;
+        last_card.protocol = "None";
+        last_card.uid = "";
+        last_card.detail = reader_14b_only ? "14B only" : "Scanning";
+        reader_last_hold_log_ms = 0;
+        reader_fail_streak = 0;
+        reader_need_first_tone = true;
         last_poll_ms = 0;
+        Serial.printf("[READER] mode=%s\n", reader_14b_only ? "14B_ONLY" : "AUTO");
+        drawScreen();
       } else if (menu_page == MenuPage::ReadNDEF) {
         scanNdefNow();
       } else if (menu_page == MenuPage::Diagnose) {

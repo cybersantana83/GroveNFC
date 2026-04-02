@@ -30,6 +30,7 @@ constexpr uint16_t I2cEpromReg_Addr = 0x1000;
 
 constexpr uint16_t SYS_REG_MODE_DEFAULT = 0x0000;
 constexpr uint16_t SYS_REG_MODE_READER = 0x0100;
+constexpr uint16_t SYS_REG_MODE_TAG = 0x0200;
 constexpr uint16_t SYS_REG_MODE_TAG_NONE = 0x0000;
 constexpr uint16_t SYS_REG_MODE_TAG_NTAG213 = 0x0001;
 constexpr uint16_t SYS_REG_MODE_TAG_NTAG215 = 0x0002;
@@ -98,8 +99,10 @@ class GroveNFC {
   bool startEmulationNtag215();
   bool startEmulationNtag216();
   bool startEmulationChinaII();
+  bool startEmulationFelica();
   bool startEmulationISO15();
   bool readAny(CardInfo& card);
+  bool readOnlyISO14B(CardInfo& card);
   bool readNdef(String& ndef_text, String& detail);
 
  private:

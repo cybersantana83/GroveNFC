@@ -6,6 +6,7 @@ namespace {
 constexpr uint16_t kTagAddrNtag213 = 0x0000;
 constexpr uint16_t kTagAddrISO15 = 0x7000;
 constexpr uint16_t kTagAddr14B = 0x0000;
+constexpr uint16_t kTagAddrFelica = 0x0000;
 constexpr uint16_t kTagAddrNtag215 = 0x1000;
 constexpr uint16_t kTagAddrNtag216 = 0x2000;
 constexpr uint16_t kTagAddrMifare1k = 0x3000;
@@ -60,6 +61,25 @@ const uint8_t kISO15TagHeader[] = {
 
 uint8_t applyLowNibbleSlot(uint8_t value, uint8_t slot) {
   return static_cast<uint8_t>((value & 0xF0) | (((value & 0x0F) + (slot & 0x0F)) & 0x0F));
+}
+
+String bytesToHexCompact(const uint8_t* data, size_t len) {
+  static const char* kHex = "0123456789ABCDEF";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    out += kHex[(data[i] >> 4) & 0x0F];
+    out += kHex[data[i] & 0x0F];
+  }
+  return out;
+}
+
+void updateNtagBcc(uint8_t* header, size_t len) {
+  if (len < 9) return;
+  // BCC0 = CT(0x88) XOR UID0 XOR UID1 XOR UID2
+  header[3] = static_cast<uint8_t>(0x88 ^ header[0] ^ header[1] ^ header[2]);
+  // BCC1 = UID3 XOR UID4 XOR UID5 XOR UID6
+  header[8] = static_cast<uint8_t>(header[4] ^ header[5] ^ header[6] ^ header[7]);
 }
 
 }  // namespace
@@ -205,6 +225,15 @@ bool GroveNFC::startEmulationChinaII() {
   return writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_CHINA_II);
 }
 
+bool GroveNFC::startEmulationFelica() {
+  // The reference firmware exposes FeliCa reader only and no FeliCa tag-mode constant.
+  // Returning false avoids entering an invalid emulation mode.
+  stopRF();
+  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
+  (void)kTagAddrFelica;
+  return false;
+}
+
 bool GroveNFC::startEmulationISO15() {
   writeISO15Image();
   stopRF();
@@ -216,10 +245,27 @@ bool GroveNFC::startEmulationISO15() {
 }
 
 bool GroveNFC::readAny(CardInfo& card) {
-  if (readISO14A(card)) return true;
+  if (readISO14B(card)) {
+    return true;
+  }
+  if (readISO14A(card)) {
+    return true;
+  }
+  if (readISO15(card)) {
+    return true;
+  }
+  if (readFelica(card)) {
+    return true;
+  }
+  card.valid = false;
+  card.protocol = "None";
+  card.uid = "";
+  card.detail = "No card";
+  return false;
+}
+
+bool GroveNFC::readOnlyISO14B(CardInfo& card) {
   if (readISO14B(card)) return true;
-  if (readISO15(card)) return true;
-  if (readFelica(card)) return true;
   card.valid = false;
   card.protocol = "None";
   card.uid = "";
@@ -536,31 +582,121 @@ bool GroveNFC::readISO14A(CardInfo& card) {
 }
 
 bool GroveNFC::readISO14B(CardInfo& card) {
-  if (!selectReaderCommon()) return false;
-  writeSysReg(I2cSysReg_SetRFConfig_Addr, SYS_REG_RFCONFIG_READER_ISO14B_106K | SYS_REG_RFCONFIG_TAG_ISO14443B_106K);
-  writeSysReg(I2cSysReg_SetFWI_Addr, 0x0000);
-  writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14B_ENABLE);
-  writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_14B_ENABLE);
-  writeMiscReg(I2cMiscReg_SetEGT_Addr, MISC_REG_EGT_6);
-  writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_ON);
-  delay(5);
+  auto runOnce = [&]() -> bool {
+    stopRF();
+    if (!writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+    delay(10);
+    if (!writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_READER | SYS_REG_MODE_TAG_NONE)) return false;
 
-  uint8_t rx[64] = {0};
-  uint16_t rx_len = sizeof(rx);
-  uint8_t wupb[] = {0x05, 0x00, 0x00};
-  if (!txrx(wupb, sizeof(wupb), rx, rx_len, 10) || rx_len < 5) return false;
+    writeSysReg(I2cSysReg_SetTagAddr_Addr, 0x0000);
+    writeMiscReg(I2cMiscReg_SetThru_Addr, MISC_REG_THRU_DISABLE);
+    writeMiscReg(I2cMiscReg_SetTxLastBit_Addr, MISC_REG_TXLASTBIT_0);
+    writeSysReg(I2cSysReg_SetRFConfig_Addr, SYS_REG_RFCONFIG_READER_ISO14B_106K | SYS_REG_RFCONFIG_TAG_ISO14443B_106K);
+    writeSysReg(I2cSysReg_SetFWI_Addr, 0x0000);
+    writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14B_ENABLE);
+    writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_14B_ENABLE);
+    writeMiscReg(I2cMiscReg_SetEGT_Addr, MISC_REG_EGT_6);
+    writeSysReg(I2cSysReg_GetNFCStatus_Addr, 0x0000);
+    writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_ON);
+    delay(10);
 
-  uint8_t pupi[4] = {rx[1], rx[2], rx[3], rx[4]};
+    uint8_t rx[128] = {0};
+    uint16_t rx_len = 0;
+    uint16_t status = 0;
 
-  uint8_t attrib[] = {0x1D, pupi[0], pupi[1], pupi[2], pupi[3], 0x00, 0x08, 0x01, 0x08};
-  rx_len = sizeof(rx);
-  if (!txrx(attrib, sizeof(attrib), rx, rx_len, 10)) return false;
+    auto sendRecv = [&](const char* step, const uint8_t* tx, uint16_t tx_len) -> bool {
+      writeSysReg(I2cSysReg_GetNFCStatus_Addr, 0x0000);
+      if (!writeData(I2cDataReg_Addr, tx, tx_len)) return false;
+      delay(10);
+      status = readSysReg(I2cSysReg_GetNFCStatus_Addr);
+      if (!(status & SYS_REG_NFCSTATUS_RECV_DONE)) {
+        const uint32_t start = millis();
+        while (millis() - start < 20) {
+          delay(2);
+          status = readSysReg(I2cSysReg_GetNFCStatus_Addr);
+          if (status & SYS_REG_NFCSTATUS_RECV_DONE) break;
+        }
+      }
+      if (!(status & SYS_REG_NFCSTATUS_RECV_DONE)) {
+        (void)step;
+        return false;
+      }
+      rx_len = readSysReg(I2cSysReg_GetRxLen_Addr);
+      if (rx_len == 0 || rx_len > sizeof(rx)) {
+        (void)step;
+        return false;
+      }
+      return readData(I2cDataReg_Addr, rx, rx_len);
+    };
 
-  card.protocol = "ISO14443B";
-  card.uid = bytesToHex(pupi, 4);
-  card.valid = true;
-  card.detail = "PUPI";
-  return true;
+    auto tryAutoOrManualCrc = [&](const char* step, const uint8_t* cmd_auto, uint16_t len_auto, const uint8_t* cmd_full, uint16_t len_full) -> bool {
+      writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14B_ENABLE);
+      if (sendRecv(step, cmd_auto, len_auto)) return true;
+
+      writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_DISABLE);
+      const bool ok = sendRecv(step, cmd_full, len_full);
+      writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14B_ENABLE);
+      return ok;
+    };
+
+    bool reqb_ok = false;
+    const uint8_t reqb_auto_00[] = {0x05, 0x00, 0x00};
+    const uint8_t reqb_full_00[] = {0x05, 0x00, 0x00, 0x71, 0xFF};
+    reqb_ok = tryAutoOrManualCrc("REQB", reqb_auto_00, sizeof(reqb_auto_00), reqb_full_00, sizeof(reqb_full_00));
+    if (!reqb_ok) {
+      const uint8_t reqb_auto_08[] = {0x05, 0x00, 0x08};
+      reqb_ok = tryAutoOrManualCrc("REQB", reqb_auto_08, sizeof(reqb_auto_08), reqb_auto_08, sizeof(reqb_auto_08));
+    }
+    if (!reqb_ok) {
+      const uint8_t reqb_auto_01[] = {0x05, 0x00, 0x01};
+      reqb_ok = tryAutoOrManualCrc("REQB", reqb_auto_01, sizeof(reqb_auto_01), reqb_auto_01, sizeof(reqb_auto_01));
+    }
+    if (!reqb_ok) {
+      const uint8_t reqb_auto_02[] = {0x05, 0x00, 0x02};
+      reqb_ok = tryAutoOrManualCrc("REQB", reqb_auto_02, sizeof(reqb_auto_02), reqb_auto_02, sizeof(reqb_auto_02));
+    }
+    if (!reqb_ok) {
+      stopRF();
+      return false;
+    }
+
+    const uint8_t attrib_auto[] = {0x1D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x08};
+    const uint8_t attrib_full[] = {0x1D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x08, 0xF3, 0x10};
+    const bool attrib_ok = tryAutoOrManualCrc("ATTRIB", attrib_auto, sizeof(attrib_auto), attrib_full, sizeof(attrib_full));
+    if (!attrib_ok) {
+      stopRF();
+      return false;
+    }
+
+    uint8_t uid_buf[16] = {0};
+    size_t uid_len = 0;
+    if (rx_len >= 4) {
+      uid_len = rx_len > sizeof(uid_buf) ? sizeof(uid_buf) : rx_len;
+      memcpy(uid_buf, rx, uid_len);
+    }
+
+    const uint8_t getuid_auto[] = {0x00, 0x36, 0x00, 0x00, 0x08};
+    const uint8_t getuid_full[] = {0x00, 0x36, 0x00, 0x00, 0x08, 0x57, 0x44};
+    if (tryAutoOrManualCrc("GETUID", getuid_auto, sizeof(getuid_auto), getuid_full, sizeof(getuid_full)) && rx_len >= 4) {
+      uid_len = rx_len > sizeof(uid_buf) ? sizeof(uid_buf) : rx_len;
+      memcpy(uid_buf, rx, uid_len);
+    }
+
+    stopRF();
+    if (uid_len == 0) return false;
+
+    card.protocol = "ISO14443B";
+    card.uid = bytesToHex(uid_buf, uid_len);
+    card.detail = "ChinaID UID";
+    card.valid = true;
+    return true;
+  };
+
+  if (runOnce()) return true;
+
+  recover();
+  delay(20);
+  return runOnce();
 }
 
 bool GroveNFC::readISO15(CardInfo& card) {
@@ -597,10 +733,38 @@ bool GroveNFC::readFelica(CardInfo& card) {
   uint8_t polling[] = {0x06, 0x00, 0xFF, 0xFF, 0x00, 0x00};
   if (!txrx(polling, sizeof(polling), rx, rx_len, 15) || rx_len < 10) return false;
 
+  const uint8_t* idm = &rx[2];
+  const bool has_pmm = rx_len >= 18;
+
   card.protocol = "FeliCa";
-  card.uid = bytesToHex(&rx[2], 8);
+  card.uid = bytesToHex(idm, 8);
   card.valid = true;
-  card.detail = "IDm";
+
+  String detail = "ID: " + card.uid;
+  const uint16_t manufacturer = (uint16_t(idm[0]) << 8) | uint16_t(idm[1]);
+  char line[48] = {0};
+  snprintf(line, sizeof(line), "\nManufacturer code: 0x%04X", manufacturer);
+  detail += line;
+
+  if (has_pmm) {
+    const uint8_t* pmm = &rx[10];
+    const uint16_t ic_code = (uint16_t(pmm[0]) << 8) | uint16_t(pmm[1]);
+    detail += "\nPMm: 0x" + bytesToHexCompact(pmm, 8);
+    snprintf(line, sizeof(line), "\nIC code: 0x%04X", ic_code);
+    detail += line;
+    snprintf(line, sizeof(line), "\nROM type: 0x%02X", pmm[0]);
+    detail += line;
+    snprintf(line, sizeof(line), "\nIC type: 0x%02X", pmm[1]);
+    detail += line;
+
+    detail += "\nMax command response times:";
+    for (uint8_t i = 2; i < 8; ++i) {
+      snprintf(line, sizeof(line), " %02X", pmm[i]);
+      detail += line;
+    }
+  }
+
+  card.detail = detail;
   return true;
 }
 
@@ -715,6 +879,7 @@ void GroveNFC::writeNtag213Image() {
   uint8_t header[sizeof(kNtag213Header)] = {0};
   memcpy(header, kNtag213Header, sizeof(header));
   header[7] = applyLowNibbleSlot(header[7], slot_index_);
+  updateNtagBcc(header, sizeof(header));
 
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
@@ -730,6 +895,7 @@ void GroveNFC::writeNtag215Image() {
   uint8_t header[sizeof(kNtag215Header)] = {0};
   memcpy(header, kNtag215Header, sizeof(header));
   header[7] = applyLowNibbleSlot(header[7], slot_index_);
+  updateNtagBcc(header, sizeof(header));
 
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
@@ -745,6 +911,7 @@ void GroveNFC::writeNtag216Image() {
   uint8_t header[sizeof(kNtag216Header)] = {0};
   memcpy(header, kNtag216Header, sizeof(header));
   header[7] = applyLowNibbleSlot(header[7], slot_index_);
+  updateNtagBcc(header, sizeof(header));
 
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(2);
