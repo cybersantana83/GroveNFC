@@ -561,6 +561,174 @@ void drawWrappedText(lgfx::v1::LGFXBase& d,
   }
 }
 
+void drawPixelFrame(lgfx::v1::LGFXBase& d, int x, int y, int width, int height, uint16_t color) {
+  if (width < 8 || height < 8) return;
+  d.fillRect(x, y, width, height, TFT_BLACK);
+  d.drawRect(x, y, width, height, color);
+  d.drawRect(x + 1, y + 1, width - 2, height - 2, color);
+  d.fillRect(x, y, 3, 3, TFT_BLACK);
+  d.fillRect(x + width - 3, y, 3, 3, TFT_BLACK);
+  d.fillRect(x, y + height - 3, 3, 3, TFT_BLACK);
+  d.fillRect(x + width - 3, y + height - 3, 3, 3, TFT_BLACK);
+  d.fillRect(x + 2, y + 1, 2, 2, color);
+  d.fillRect(x + width - 4, y + 1, 2, 2, color);
+  d.fillRect(x + 2, y + height - 3, 2, 2, color);
+  d.fillRect(x + width - 4, y + height - 3, 2, 2, color);
+}
+
+String readerTypeLabel(const grove_nfc::CardInfo& card, bool only_14b) {
+  if (card.valid) {
+    return String(protocolFull(card.protocol));
+  }
+  return only_14b ? String("SCAN 14B") : String("SCANNING");
+}
+
+String readerIdLabel(const grove_nfc::CardInfo& card) {
+  if (!card.valid) return "--";
+  String id = formatIdText(card.uid);
+  if (!id.isEmpty()) return id;
+  return "--";
+}
+
+void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
+                         int x,
+                         int y,
+                         int width,
+                         int height,
+                         uint16_t accent,
+                         const grove_nfc::CardInfo& card,
+                         bool only_14b,
+                         bool anim_only = false) {
+  if (width < 40 || height < 24) return;
+
+  if (!anim_only) {
+    d.fillRect(x, y, width, height, TFT_BLACK);
+  }
+
+  if (!card.valid) {
+    const int center_y = y + height / 2;
+    const int card_w = min(56, width - 20);
+    const int card_h = 30;
+    const int card_x = x + (width - card_w) / 2;
+    const int card_y = center_y - (card_h / 2);
+
+    if (!anim_only) {
+      const uint16_t c1 = scaleColor565(accent, 220);
+      const uint16_t c2 = scaleColor565(accent, 170);
+      // Pixel-style rectangle.
+      d.drawRect(card_x, card_y, card_w, card_h, c1);
+      d.drawRect(card_x + 1, card_y + 1, card_w - 2, card_h - 2, c2);
+      d.fillRect(card_x, card_y, 3, 3, TFT_BLACK);
+      d.fillRect(card_x + card_w - 3, card_y, 3, 3, TFT_BLACK);
+      d.fillRect(card_x, card_y + card_h - 3, 3, 3, TFT_BLACK);
+      d.fillRect(card_x + card_w - 3, card_y + card_h - 3, 3, 3, TFT_BLACK);
+    }
+
+    // Pixel-style scanning band (bright core + dim tails) bouncing left-right.
+    static int last_scan_x = -1;
+    static int scan_pos = 0;
+    static int scan_dir = 1;  // 1: left->right, -1: right->left
+    static uint32_t last_step_ms = 0;
+    const int inner_left = card_x + 4;
+    const int inner_w = max(1, card_w - 8);
+    const int travel = max(1, inner_w - 2);
+    const uint32_t now_ms = millis();
+    const uint8_t speed_mul = 3;    // 扫描速度倍率(3x)
+    const uint32_t cycle_ms = 900;  // 基础节奏
+    const uint32_t raw_step_ms = cycle_ms / static_cast<uint32_t>(travel * 2);
+    const uint32_t step_ms = (raw_step_ms == 0) ? 1 : raw_step_ms;
+
+    if (!anim_only || scan_pos < 0 || scan_pos > travel) {
+      // 完整刷新或状态重建时，稳定从左侧开始
+      scan_pos = 0;
+      scan_dir = 1;
+      last_step_ms = now_ms;
+    } else {
+      const uint32_t elapsed = now_ms - last_step_ms;
+      if (elapsed >= step_ms) {
+        uint32_t steps = elapsed / step_ms;
+        // 限幅补偿：避免低帧后一次跨太多像素导致“抽动感”
+        if (steps > 2) steps = 2;
+        while (steps--) {
+          for (uint8_t i = 0; i < speed_mul; ++i) {
+            scan_pos += scan_dir;
+            if (scan_pos >= travel) {
+              scan_pos = travel;
+              scan_dir = -1;
+            } else if (scan_pos <= 0) {
+              scan_pos = 0;
+              scan_dir = 1;
+            }
+          }
+        }
+        last_step_ms = now_ms;
+      }
+    }
+    const int scan_x = inner_left + scan_pos;
+
+    if (scan_x != last_scan_x || !anim_only) {
+      if (anim_only && last_scan_x >= inner_left) {
+        // 局部刷新：擦除上一帧扫描带（4px宽）
+        const int old_band_x = max(inner_left, last_scan_x - 1);
+        const int old_band_r = min(inner_left + travel + 1, last_scan_x + 2);
+        d.fillRect(old_band_x, card_y + 3, old_band_r - old_band_x + 1, card_h - 6, TFT_BLACK);
+      } else if (!anim_only) {
+        last_scan_x = -1; // 完整刷新时重置
+      }
+
+      const uint16_t tail = scaleColor565(TFT_WHITE, 110);
+      const int band_x = max(inner_left, scan_x - 1);
+      const int band_r = min(inner_left + travel + 1, scan_x + 2);
+      for (int px = band_x; px <= band_r; ++px) {
+        const bool is_core = (px >= scan_x && px <= scan_x + 1);
+        d.fillRect(px, card_y + 3, 1, card_h - 6, is_core ? TFT_WHITE : tail);
+      }
+      last_scan_x = scan_x;
+    }
+    return;
+  }
+
+  if (anim_only) return;
+
+
+  String type_text = upperText(readerTypeLabel(card, only_14b));
+  String id_text = marqueeText(readerIdLabel(card), 16, 180);
+
+  d.setFont(&fonts::Font0);
+  d.setTextSize(2);
+
+  const int type_w = d.textWidth(type_text);
+  const int id_w = d.textWidth(id_text);
+  const int type_x = x + (width - type_w) / 2;
+  const int id_x = x + (width - id_w) / 2;
+  const int center_y = y + height / 2;
+  const int type_y = center_y - 18;
+  const int id_y = center_y + 4;
+
+  d.setTextColor(accent, TFT_BLACK);
+  d.setCursor(type_x, type_y);
+  d.print(type_text);
+
+  const int deco_gap = 6;
+  const int deco_y = type_y + 1;
+  const int left_deco_x = type_x - deco_gap - 12;
+  const int right_deco_x = type_x + type_w + deco_gap;
+  if (left_deco_x >= x + 1 && right_deco_x + 12 <= x + width - 1) {
+    // Left/right chunky arrows pointing inward.
+    d.fillRect(left_deco_x + 1, deco_y + 2, 3, 10, accent);
+    d.fillRect(left_deco_x + 4, deco_y + 4, 3, 6, accent);
+    d.fillRect(left_deco_x + 7, deco_y + 6, 3, 2, accent);
+
+    d.fillRect(right_deco_x + 8, deco_y + 2, 3, 10, accent);
+    d.fillRect(right_deco_x + 5, deco_y + 4, 3, 6, accent);
+    d.fillRect(right_deco_x + 2, deco_y + 6, 3, 2, accent);
+  }
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.setCursor(id_x, id_y);
+  d.print(id_text);
+}
+
 void drawPianoKeyboard(lgfx::v1::LGFXBase& d,
                        int x,
                        int y,
@@ -1043,12 +1211,7 @@ void drawScreen(bool popup_only = false) {
         d.print(emuActionName(static_cast<uint8_t>(idx)));
       }
     } else if (menu_page == MenuPage::Reader) {
-      d.setTextColor(accent, TFT_BLACK);
-      d.setCursor(4, content_top + 2);
-      d.print(last_card.valid ? protocolFull(last_card.protocol) : "Scanning");
-      d.setTextColor(TFT_WHITE, TFT_BLACK);
-      String body = readerBodyText(last_card);
-      drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
+      drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, accent, last_card, reader_14b_only);
     } else if (menu_page == MenuPage::ReadNDEF) {
       String title = "Scanning";
       String body = "";
@@ -1421,9 +1584,7 @@ void drawScreen(bool popup_only = false) {
   int body_y = 54;
 
   if (menu_page == MenuPage::Reader) {
-    d.setFont(&fonts::Font0);
-    d.setTextSize(2);
-    drawWrappedText(d, 4, body_y, w - 8, 18, 4, 12, body_line, TFT_WHITE, TFT_BLACK);
+    drawReaderPixelCard(d, 4, 26, w - 8, h - 30, accent, last_card, reader_14b_only);
   } else if (menu_page == MenuPage::ReadNDEF) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
@@ -2295,7 +2456,11 @@ void handleReader() {
     if (last_card.valid && now - last_reader_success_ms > 1200) {
       recoverNfc("Reader stuck after tag", true);
     }
-    if (last_card.valid || last_card.detail != "No card") {
+    card.valid = false;
+    card.protocol = "None";
+    card.uid = "";
+    card.detail = "No card";
+    if (last_card.valid || last_card.detail != card.detail || last_card.protocol != card.protocol) {
       last_card = card;
       drawScreen();
     }
@@ -2403,10 +2568,8 @@ void setup() {
   const char* target_name = "Unknown";
 #if defined(APP_TARGET_STICKS3)
   target_name = "M5StickS3";
-#elif defined(APP_TARGET_STICKCPLUS2)
-  target_name = "M5StickCPlus2";
-#elif defined(APP_TARGET_STICKCPLUS1_1)
-  target_name = "M5StickCPlus1.1";
+#elif defined(APP_TARGET_STICKCPLUS)
+  target_name = "M5StickCPlus";
 #elif defined(APP_TARGET_ATOMS3)
   target_name = "AtomS3";
 #endif
@@ -2457,13 +2620,36 @@ void loop() {
   emitHeartbeat();
   maintainNfcConnection();
   autoScanNdef();
-  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF) && ui_marquee_active) {
-    const uint32_t now = millis();
-    if (now - last_ui_scroll_ms >= kUiScrollMs) {
-      last_ui_scroll_ms = now;
-      drawScreen();
+
+  if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
+    const bool anim_running = (!last_card.valid && menu_page == MenuPage::Reader);
+    if (ui_marquee_active || anim_running) {
+      const uint32_t now = millis();
+      // 动画跑的时候更快一些，比如 20ms 一帧
+      const uint32_t interval = (anim_running && !ui_marquee_active) ? 6 : kUiScrollMs;
+      if (now - last_ui_scroll_ms >= interval) {
+        last_ui_scroll_ms = now;
+        if (anim_running && !ui_marquee_active) {
+          auto& d = M5.Display;
+          const int w = d.width();
+          const int h = d.height();
+#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
+          if (w > h) {
+            const int header_h = 18;
+            const int content_top = header_h + 2;
+            const int content_h = h - content_top - 2;
+            drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, TFT_GREEN, last_card, reader_14b_only, true);
+          } else {
+            drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+          }
+#endif
+        } else {
+          drawScreen();
+        }
+      }
     }
   }
+
   if (!in_home && menu_page == MenuPage::Diagnose && diagnose_ok) {
     const uint32_t now = millis();
     if (now - last_diag_scroll_ms >= kDiagScrollMs) {

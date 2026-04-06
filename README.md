@@ -1,6 +1,6 @@
 # GroveNFC Reference Demo (AtomS3 + M5Stick Series)
 
-Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus1.1 / M5StickC Plus2**.
+Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware)**.
 
 This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
 
@@ -40,7 +40,7 @@ Current board I2C pins (auto-selected in `src/main.cpp` by build target):
 
 - AtomS3: SDA `GPIO2`, SCL `GPIO1`
 - M5StickS3: SDA `GPIO9`, SCL `GPIO10`
-- M5StickC Plus1.1 / Plus2: SDA `GPIO32`, SCL `GPIO33`
+- M5StickC Plus (1.1 / Plus2 unified): SDA `GPIO32`, SCL `GPIO33`
 - I2C address: `0x48`
 
 Pin mapping note:
@@ -49,7 +49,7 @@ Pin mapping note:
 
 Audio note:
 
-- M5StickC Plus1.1 / Plus2 use **PWM buzzer** (no full speaker path).
+- M5StickC Plus (1.1 / Plus2) use **PWM buzzer** (no full speaker path).
 
 If your wiring uses different pins, update `kSdaPin` and `kSclPin`.
 
@@ -117,7 +117,7 @@ Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
   - `m5stack-atoms3`
   - `m5stack-sticks3`
   - `m5stack-stickcplus`
-  - `m5stack-stickcplus2`
+    - `m5stack-stickcplus2` (alias of `m5stack-stickcplus`)
 4. Open Serial Monitor at `115200`
 
 Example:
