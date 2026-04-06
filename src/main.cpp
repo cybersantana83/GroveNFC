@@ -2,6 +2,10 @@
 #include <Preferences.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <freertos/queue.h>
 
 #include "GroveNFC.h"
 
@@ -123,6 +127,7 @@ uint8_t emu_type_scroll = 0;
 uint8_t emu_slot = 0;
 grove_nfc::CardInfo last_card;
 uint32_t last_poll_ms = 0;
+uint32_t last_reader_anim_gate_ms = 0;
 bool nfc_ready = false;
 bool emu_started = false;
 String diagnose_report;
@@ -168,6 +173,78 @@ String piano_last_note = "-";
 String piano_active_card_key;
 int8_t piano_active_note_idx = -1;
 uint32_t piano_last_sustain_ms = 0;
+
+// ---- NFC Worker Task (Core 0) Infrastructure ----
+// NFC I2C operations run on a dedicated FreeRTOS task on Core 0,
+// so the UI animation loop on Core 1 never blocks on I2C.
+
+SemaphoreHandle_t nfc_mutex = nullptr;
+TaskHandle_t nfc_task_handle = nullptr;
+
+// Command queue: UI thread -> NFC worker
+enum class NfcCmd : uint8_t {
+  None = 0,
+  StartEmulation,
+  StopRF,
+  RunDiagnose,
+  ScanNdefNow,
+  Recover,
+};
+QueueHandle_t nfc_cmd_queue = nullptr;
+
+// Results from NFC worker -> UI thread (protected by nfc_mutex)
+struct NfcReaderResult {
+  CardInfo card;
+  bool got_card = false;
+  bool new_result = false;  // set by worker, cleared by UI
+};
+NfcReaderResult nfc_reader_result;
+
+struct NfcNdefResult {
+  String text;
+  String detail;
+  bool ok = false;
+  bool new_result = false;
+};
+NfcNdefResult nfc_ndef_result;
+
+struct NfcPianoResult {
+  CardInfo card;
+  bool got_card = false;
+  bool new_result = false;
+};
+NfcPianoResult nfc_piano_result;
+
+struct NfcHealthResult {
+  bool lost_connection = false;
+  bool reconnected = false;
+  uint16_t new_hw_ver = 0;
+  uint16_t new_fw_ver = 0;
+  bool need_recover = false;
+  bool new_result = false;
+};
+NfcHealthResult nfc_health_result;
+
+struct NfcCmdResult {
+  bool ok = false;
+  String report;   // for diagnose
+  uint16_t hw = 0;
+  uint16_t fw = 0;
+  bool done = false;
+};
+NfcCmdResult nfc_cmd_result;
+
+// Snapshot of UI state read by the NFC worker (set by UI, read by worker)
+bool nfc_w_reader_14b_only = false;
+bool nfc_w_is_reader_page = false;
+bool nfc_w_is_ndef_page = false;
+bool nfc_w_is_piano_page = false;
+bool nfc_w_card_valid = false;
+bool nfc_w_wifi_popup = false;
+bool nfc_w_in_home = true;
+EmuType nfc_w_emu_type = EmuType::N213;
+uint8_t nfc_w_emu_slot = 0;
+PianoStage nfc_w_piano_stage = PianoStage::Menu;
 
 inline bool mainButtonClicked() {
   return M5.BtnA.wasClicked();
@@ -289,6 +366,7 @@ bool parseWifiNdef(const String& input, String& ssid, String& pass, String& auth
 void stopAllModes();
 bool recoverNfc(const char* reason, bool rebegin);
 bool initNfcAtBoot();
+bool sendNfcCmdAndWait(NfcCmd cmd, uint32_t timeout_ms = 2000);
 void goHome();
 void enterCurrentFeature();
 void runDiagnose();
@@ -629,36 +707,42 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
     static int scan_pos = 0;
     static int scan_dir = 1;  // 1: left->right, -1: right->left
     static uint32_t last_step_ms = 0;
+    static uint32_t scan_frac_num = 0;  // 小数步进累计，保证恒速
     const int inner_left = card_x + 4;
     const int inner_w = max(1, card_w - 8);
     const int travel = max(1, inner_w - 2);
     const uint32_t now_ms = millis();
-    const uint8_t speed_mul = 3;    // 扫描速度倍率(3x)
-    const uint32_t cycle_ms = 900;  // 基础节奏
-    const uint32_t raw_step_ms = cycle_ms / static_cast<uint32_t>(travel * 2);
-    const uint32_t step_ms = (raw_step_ms == 0) ? 1 : raw_step_ms;
+    const uint8_t speed_mul = 1;     // 扫描速度倍率(1x，双核后无需加速补偿)
+    const uint32_t cycle_ms = 1800;  // 左->右->左一整趟(ms)
+    const uint32_t half_cycle_ms = (cycle_ms / 2 == 0) ? 1 : (cycle_ms / 2);
 
     if (!anim_only || scan_pos < 0 || scan_pos > travel) {
       // 完整刷新或状态重建时，稳定从左侧开始
       scan_pos = 0;
       scan_dir = 1;
       last_step_ms = now_ms;
+      scan_frac_num = 0;
     } else {
       const uint32_t elapsed = now_ms - last_step_ms;
-      if (elapsed >= step_ms) {
-        uint32_t steps = elapsed / step_ms;
-        // 限幅补偿：避免低帧后一次跨太多像素导致“抽动感”
-        if (steps > 2) steps = 2;
-        while (steps--) {
-          for (uint8_t i = 0; i < speed_mul; ++i) {
-            scan_pos += scan_dir;
-            if (scan_pos >= travel) {
-              scan_pos = travel;
-              scan_dir = -1;
-            } else if (scan_pos <= 0) {
-              scan_pos = 0;
-              scan_dir = 1;
-            }
+      if (elapsed > 0) {
+        // 恒速推进：按真实经过时间计算应前进像素，掉帧时补齐，不会“半途变慢”
+        uint64_t adv_num = static_cast<uint64_t>(scan_frac_num) +
+                           static_cast<uint64_t>(elapsed) * static_cast<uint64_t>(travel) * static_cast<uint64_t>(speed_mul);
+        uint32_t advance_px = static_cast<uint32_t>(adv_num / half_cycle_ms);
+        scan_frac_num = static_cast<uint32_t>(adv_num % half_cycle_ms);
+
+        const uint32_t period = static_cast<uint32_t>(travel * 2);
+        if (period > 0 && advance_px > period) {
+          advance_px %= period;
+        }
+        while (advance_px--) {
+          scan_pos += scan_dir;
+          if (scan_pos >= travel) {
+            scan_pos = travel;
+            scan_dir = -1;
+          } else if (scan_pos <= 0) {
+            scan_pos = 0;
+            scan_dir = 1;
           }
         }
         last_step_ms = now_ms;
@@ -1905,9 +1989,11 @@ bool recoverNfc(const char* reason, bool rebegin) {
   if (reason && reason[0] != '\0') {
     Serial.printf("[NFC] Recover: %s\n", reason);
   }
-  bool ok = nfc.recover();
-  if (ok && rebegin) {
-    ok = nfc.begin();
+
+  // Delegate to NFC worker on Core 0
+  bool ok = false;
+  if (sendNfcCmdAndWait(NfcCmd::Recover, 3000)) {
+    ok = nfc_cmd_result.ok;
   }
 
   if (!ok) {
@@ -1946,7 +2032,7 @@ bool initNfcAtBoot() {
 }
 
 void stopAllModes() {
-  nfc.stopRF();
+  sendNfcCmdAndWait(NfcCmd::StopRF, 1000);
   emu_started = false;
 }
 
@@ -2057,24 +2143,14 @@ void enterMenu(MenuPage mode) {
 void startCurrentEmulation() {
   if (!nfc_ready) return;
 
-  nfc.setSlot(emu_slot);
-  bool ok = false;
-  if (emu_type == EmuType::MF1K) {
-    ok = nfc.startEmulationMifare1K();
-  } else if (emu_type == EmuType::N213) {
-    ok = nfc.startEmulationNtag213();
-  } else if (emu_type == EmuType::N215) {
-    ok = nfc.startEmulationNtag215();
-  } else if (emu_type == EmuType::N216) {
-    ok = nfc.startEmulationNtag216();
-  } else if (emu_type == EmuType::ISO14B) {
-    ok = nfc.startEmulationChinaII();
-  } else if (emu_type == EmuType::Felica) {
-    ok = nfc.startEmulationFelica();
-  } else if (emu_type == EmuType::ISO15) {
-    ok = nfc.startEmulationISO15();
+  // Delegate to NFC worker on Core 0
+  nfc_w_emu_type = emu_type;
+  nfc_w_emu_slot = emu_slot;
+  if (sendNfcCmdAndWait(NfcCmd::StartEmulation, 3000)) {
+    emu_started = nfc_cmd_result.ok;
+  } else {
+    emu_started = false;
   }
-  emu_started = ok;
   drawScreen();
 }
 
@@ -2141,9 +2217,15 @@ void runDiagnose() {
     return;
   }
 
-  diagnose_ok = nfc.selfCheck(diagnose_report);
-  hw_ver = nfc.hardwareVersion();
-  fw_ver = nfc.firmwareVersion();
+  if (sendNfcCmdAndWait(NfcCmd::RunDiagnose, 5000)) {
+    diagnose_ok = nfc_cmd_result.ok;
+    diagnose_report = nfc_cmd_result.report;
+    hw_ver = nfc_cmd_result.hw;
+    fw_ver = nfc_cmd_result.fw;
+  } else {
+    diagnose_ok = false;
+    diagnose_report = "Diagnose timeout";
+  }
   Serial.printf("[DIAG] %s\n%s\n", diagnose_ok ? "PASS" : "FAIL", diagnose_report.c_str());
   drawScreen();
 }
@@ -2308,13 +2390,21 @@ void scanNdefNow() {
     return;
   }
 
-  String detail;
-  String text;
-  if (!nfc.readNdef(text, detail)) {
+  if (!sendNfcCmdAndWait(NfcCmd::ScanNdefNow, 3000)) {
+    ndef_text = "";
+    ndef_detail = "Read timeout";
+    ndef_is_wifi = false;
+    wifi_status = "";
+    drawScreen();
+    return;
+  }
+
+  if (!nfc_cmd_result.ok) {
+    String detail = nfc_cmd_result.report;
     ndef_fail_count++;
     if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0 || detail.indexOf("error") >= 0 ||
         detail.indexOf("fail") >= 0 || detail.indexOf("timeout") >= 0 || ndef_fail_count >= 2) {
-      recoverNfc("NDEF manual read abnormal", true);
+      sendNfcCmdAndWait(NfcCmd::Recover, 2000);
       ndef_fail_count = 0;
     }
     ndef_text = "";
@@ -2325,6 +2415,11 @@ void scanNdefNow() {
     return;
   }
 
+  // Parse packed result: text + '\x01' + detail
+  String packed = nfc_cmd_result.report;
+  int sep = packed.indexOf('\x01');
+  String text = (sep >= 0) ? packed.substring(0, sep) : packed;
+  String detail = (sep >= 0) ? packed.substring(sep + 1) : "";
   ndef_text = text;
   ndef_fail_count = 0;
   ndef_detail = detail;
@@ -2412,7 +2507,11 @@ void maintainNfcConnection() {
 void handleReader() {
   if (!nfc_ready) return;
   const uint32_t now = millis();
-  const uint32_t poll_interval = last_card.valid ? kReaderHoldCheckMs : kPollIntervalMs;
+  uint32_t poll_interval = last_card.valid ? kReaderHoldCheckMs : kPollIntervalMs;
+  if (!last_card.valid && !in_home && menu_page == MenuPage::Reader && poll_interval < 220) {
+    // 无卡扫描动画期间降低读卡调用频率，减少I2C阻塞导致的动画顿挫
+    poll_interval = 220;
+  }
   if (now - last_poll_ms < poll_interval) return;
   last_poll_ms = now;
 
@@ -2551,6 +2650,467 @@ void handlePiano() {
   }
 }
 
+// ---- NFC Worker Task (runs on Core 0) ----
+// All I2C/NFC blocking calls happen here. Results are written to
+// shared result structs and consumed by the UI loop on Core 1.
+void nfcWorkerTask(void* /*param*/) {
+  uint32_t w_last_poll_ms = 0;
+  uint32_t w_last_health_ms = 0;
+  uint32_t w_last_reconnect_ms = 0;
+  uint32_t w_last_ndef_ms = 0;
+  uint32_t w_last_piano_ms = 0;
+  uint32_t w_last_reader_success_ms = millis();
+  uint32_t w_last_recover_ms = 0;
+  uint8_t w_reader_fail_streak = 0;
+  uint8_t w_ndef_fail_count = 0;
+
+  for (;;) {
+    // --- Process one-shot commands from UI (non-blocking) ---
+    NfcCmd cmd = NfcCmd::None;
+    if (xQueueReceive(nfc_cmd_queue, &cmd, 0) == pdTRUE) {
+      if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        NfcCmdResult res;
+        switch (cmd) {
+          case NfcCmd::StartEmulation: {
+            if (nfc_ready) {
+              EmuType et = static_cast<EmuType>(nfc_w_emu_type);
+              nfc.setSlot(nfc_w_emu_slot);
+              bool ok = false;
+              switch (et) {
+                case EmuType::MF1K:  ok = nfc.startEmulationMifare1K(); break;
+                case EmuType::N213:  ok = nfc.startEmulationNtag213(); break;
+                case EmuType::N215:  ok = nfc.startEmulationNtag215(); break;
+                case EmuType::N216:  ok = nfc.startEmulationNtag216(); break;
+                case EmuType::ISO14B: ok = nfc.startEmulationChinaII(); break;
+                case EmuType::Felica: ok = nfc.startEmulationFelica(); break;
+                case EmuType::ISO15:  ok = nfc.startEmulationISO15(); break;
+                default: break;
+              }
+              res.ok = ok;
+            }
+            res.done = true;
+            nfc_cmd_result = res;
+            break;
+          }
+          case NfcCmd::StopRF: {
+            nfc.stopRF();
+            res.ok = true;
+            res.done = true;
+            nfc_cmd_result = res;
+            break;
+          }
+          case NfcCmd::RunDiagnose: {
+            if (nfc_ready) {
+              String report;
+              res.ok = nfc.selfCheck(report);
+              res.report = report;
+              res.hw = nfc.hardwareVersion();
+              res.fw = nfc.firmwareVersion();
+            }
+            res.done = true;
+            nfc_cmd_result = res;
+            break;
+          }
+          case NfcCmd::ScanNdefNow: {
+            if (nfc_ready) {
+              String text, detail;
+              res.ok = nfc.readNdef(text, detail);
+              res.report = res.ok ? text : detail;
+              // Pack both into report with separator
+              if (res.ok) {
+                res.report = text + "\x01" + detail;
+              } else {
+                res.report = detail;
+              }
+            }
+            res.done = true;
+            nfc_cmd_result = res;
+            break;
+          }
+          case NfcCmd::Recover: {
+            if (nfc_ready) {
+              bool ok = nfc.recover();
+              if (ok) ok = nfc.begin();
+              if (!ok) {
+                nfc_ready = false;
+                res.ok = false;
+              } else {
+                w_last_reader_success_ms = millis();
+                res.ok = true;
+              }
+            }
+            res.done = true;
+            nfc_cmd_result = res;
+            break;
+          }
+          default:
+            break;
+        }
+        xSemaphoreGive(nfc_mutex);
+      }
+    }
+
+    const uint32_t now = millis();
+    const bool w_ready = nfc_ready;
+    const bool w_in_home = nfc_w_in_home;
+
+    // --- maintainNfcConnection (health check / reconnect) ---
+    if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (w_ready) {
+        if (now - w_last_health_ms >= kNfcHealthCheckMs) {
+          w_last_health_ms = now;
+          if (!nfc.ping()) {
+            nfc_ready = false;
+            nfc.stopRF();
+            NfcHealthResult hr;
+            hr.lost_connection = true;
+            hr.new_result = true;
+            nfc_health_result = hr;
+            Serial.println("[NFC-W] Lost connection");
+          } else if (nfc_w_is_reader_page && now - w_last_reader_success_ms > kReaderRecoverMs) {
+            if (now - w_last_recover_ms >= kRecoverCooldownMs) {
+              w_last_recover_ms = now;
+              bool ok = nfc.recover();
+              if (ok) ok = nfc.begin();
+              if (!ok) {
+                nfc_ready = false;
+                NfcHealthResult hr;
+                hr.lost_connection = true;
+                hr.new_result = true;
+                nfc_health_result = hr;
+              } else {
+                w_last_reader_success_ms = now;
+              }
+            }
+          }
+        }
+      } else {
+        if (now - w_last_reconnect_ms >= kNfcReconnectMs) {
+          w_last_reconnect_ms = now;
+          if (nfc.begin()) {
+            nfc_ready = true;
+            NfcHealthResult hr;
+            hr.reconnected = true;
+            hr.new_hw_ver = nfc.hardwareVersion();
+            hr.new_fw_ver = nfc.firmwareVersion();
+            hr.new_result = true;
+            nfc_health_result = hr;
+            w_last_health_ms = now;
+            Serial.printf("[NFC-W] Reconnected HW=0x%04X FW=0x%04X\n", hr.new_hw_ver, hr.new_fw_ver);
+          }
+        }
+      }
+      xSemaphoreGive(nfc_mutex);
+    }
+
+    // --- handleReader (periodic card poll) ---
+    if (nfc_ready && !w_in_home && nfc_w_is_reader_page) {
+      const uint32_t poll_iv = nfc_w_card_valid ? kReaderHoldCheckMs : kPollIntervalMs;
+      if (now - w_last_poll_ms >= poll_iv) {
+        w_last_poll_ms = now;
+        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          CardInfo card;
+          const bool got = nfc_w_reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card);
+          NfcReaderResult rr;
+          rr.card = card;
+          rr.got_card = got;
+          rr.new_result = true;
+          nfc_reader_result = rr;
+          if (got) {
+            w_reader_fail_streak = 0;
+            w_last_reader_success_ms = now;
+          } else {
+            if (w_reader_fail_streak < 0xFF) ++w_reader_fail_streak;
+            if (nfc_w_reader_14b_only && w_reader_fail_streak >= 8) {
+              if (now - w_last_recover_ms >= kRecoverCooldownMs) {
+                w_last_recover_ms = now;
+                bool ok = nfc.recover();
+                if (ok) ok = nfc.begin();
+                if (!ok) nfc_ready = false;
+                w_reader_fail_streak = 0;
+                w_last_poll_ms = 0;
+              }
+            }
+            if (nfc_w_card_valid && now - w_last_reader_success_ms > 1200) {
+              if (now - w_last_recover_ms >= kRecoverCooldownMs) {
+                w_last_recover_ms = now;
+                bool ok = nfc.recover();
+                if (ok) ok = nfc.begin();
+                if (!ok) nfc_ready = false;
+              }
+            }
+          }
+          xSemaphoreGive(nfc_mutex);
+        }
+      }
+    }
+
+    // --- autoScanNdef (periodic NDEF poll) ---
+    if (nfc_ready && !w_in_home && nfc_w_is_ndef_page && !nfc_w_wifi_popup) {
+      if (now - w_last_ndef_ms >= kNdefAutoPollMs) {
+        w_last_ndef_ms = now;
+        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          String text, detail;
+          bool ok = nfc.readNdef(text, detail);
+          NfcNdefResult nr;
+          nr.text = text;
+          nr.detail = detail;
+          nr.ok = ok;
+          nr.new_result = true;
+          nfc_ndef_result = nr;
+          if (!ok) {
+            w_ndef_fail_count++;
+            if (detail.indexOf("short") >= 0 || detail.indexOf("invalid") >= 0 || detail.indexOf("error") >= 0 ||
+                detail.indexOf("fail") >= 0 || detail.indexOf("timeout") >= 0 || w_ndef_fail_count >= 3) {
+              if (now - w_last_recover_ms >= kRecoverCooldownMs) {
+                w_last_recover_ms = now;
+                bool rok = nfc.recover();
+                if (rok) rok = nfc.begin();
+                if (!rok) nfc_ready = false;
+                w_ndef_fail_count = 0;
+              }
+            }
+          } else {
+            w_ndef_fail_count = 0;
+          }
+          xSemaphoreGive(nfc_mutex);
+        }
+      }
+    }
+
+    // --- handlePiano (periodic card poll for piano) ---
+    if (nfc_ready && !w_in_home && nfc_w_is_piano_page && nfc_w_piano_stage != PianoStage::Menu) {
+      if (now - w_last_piano_ms >= kPianoPollMs) {
+        w_last_piano_ms = now;
+        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          CardInfo card;
+          bool got = nfc.readAny(card);
+          NfcPianoResult pr;
+          pr.card = card;
+          pr.got_card = got;
+          pr.new_result = true;
+          nfc_piano_result = pr;
+          xSemaphoreGive(nfc_mutex);
+        }
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));  // yield to other tasks
+  }
+}
+
+// Helper: send command to NFC worker and wait for result
+bool sendNfcCmdAndWait(NfcCmd cmd, uint32_t timeout_ms) {
+  nfc_cmd_result.done = false;
+  xQueueSend(nfc_cmd_queue, &cmd, pdMS_TO_TICKS(100));
+  const uint32_t start = millis();
+  while (!nfc_cmd_result.done) {
+    if (millis() - start > timeout_ms) return false;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  return true;
+}
+
+// UI-side: process reader result from NFC worker
+void processReaderResult() {
+  if (!nfc_reader_result.new_result) return;
+  // Copy result
+  CardInfo card = nfc_reader_result.card;
+  bool got_card = nfc_reader_result.got_card;
+  nfc_reader_result.new_result = false;
+
+  if (got_card) {
+    reader_fail_streak = 0;
+    last_reader_success_ms = millis();
+    bool first_tone_played = false;
+    if (reader_need_first_tone) {
+#if defined(APP_TARGET_STICKS3)
+      playCardTone(card.protocol);
+#else
+      playSuccessTone();
+#endif
+      reader_need_first_tone = false;
+      first_tone_played = true;
+      Serial.printf("[CARD][TONE] First detect -> %s\n", formatCardLogLine(card).c_str());
+    }
+    if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
+      last_card = card;
+      if (!first_tone_played) {
+        playCardTone(card.protocol);
+      }
+      drawScreen();
+      Serial.println(formatCardLogLine(card));
+      reader_last_hold_log_ms = millis();
+    } else if (reader_14b_only && card.protocol == "ISO14443B" && millis() - reader_last_hold_log_ms >= 2000) {
+      Serial.printf("[CARD][14B][HOLD] UID=%s\n", card.uid.c_str());
+      reader_last_hold_log_ms = millis();
+    }
+  } else {
+    if (reader_fail_streak < 0xFF) ++reader_fail_streak;
+    CardInfo nc;
+    nc.valid = false;
+    nc.protocol = "None";
+    nc.uid = "";
+    nc.detail = "No card";
+    if (last_card.valid || last_card.detail != nc.detail || last_card.protocol != nc.protocol) {
+      last_card = nc;
+      drawScreen();
+    }
+  }
+  // Update shared flag for worker
+  nfc_w_card_valid = last_card.valid;
+}
+
+// UI-side: process NDEF auto-scan result from NFC worker
+void processNdefResult() {
+  if (!nfc_ndef_result.new_result) return;
+  String text = nfc_ndef_result.text;
+  String detail = nfc_ndef_result.detail;
+  bool ok = nfc_ndef_result.ok;
+  nfc_ndef_result.new_result = false;
+
+  if (!ok) {
+    if (!ndef_text.isEmpty() || ndef_detail != detail) {
+      ndef_text = "";
+      ndef_detail = detail;
+      ndef_is_wifi = false;
+      wifi_status = "";
+      drawScreen();
+    }
+    return;
+  }
+
+  const bool changed = (text != ndef_text);
+  ndef_text = text;
+  ndef_detail = detail;
+  String auth;
+  ndef_is_wifi = parseWifiNdef(ndef_text, wifi_ssid, wifi_pass, auth);
+  wifi_type = auth;
+
+  if (changed) {
+    if (ndef_is_wifi) wifi_popup = true;
+    playNdefTone(ndef_is_wifi);
+    drawScreen();
+    Serial.printf("[NDEF] %s\n", ndef_text.c_str());
+  }
+}
+
+// UI-side: process health check result from NFC worker
+void processHealthResult() {
+  if (!nfc_health_result.new_result) return;
+  bool lost = nfc_health_result.lost_connection;
+  bool reconnected = nfc_health_result.reconnected;
+  uint16_t nhw = nfc_health_result.new_hw_ver;
+  uint16_t nfw = nfc_health_result.new_fw_ver;
+  nfc_health_result.new_result = false;
+
+  if (lost) {
+    emu_started = false;
+    last_card.valid = false;
+    last_card.protocol = "None";
+    last_card.uid = "";
+    last_card.detail = "NFC disconnected";
+    Serial.println("[NFC] Lost connection");
+    drawScreen();
+  }
+  if (reconnected) {
+    hw_ver = nhw;
+    fw_ver = nfw;
+    if (menu_page == MenuPage::Reader) {
+      last_card.valid = false;
+      last_card.protocol = "None";
+      last_card.uid = "";
+      last_card.detail = "Waiting card...";
+      reader_need_first_tone = true;
+    }
+    drawScreen();
+  }
+}
+
+// UI-side: process piano result from NFC worker
+void processPianoResult() {
+  if (!nfc_piano_result.new_result) return;
+  CardInfo card = nfc_piano_result.card;
+  bool got_card = nfc_piano_result.got_card;
+  nfc_piano_result.new_result = false;
+
+  const uint32_t now = millis();
+
+  if (!got_card) {
+    const int8_t old_note = piano_active_note_idx;
+    piano_active_card_key = "";
+    piano_active_note_idx = -1;
+    piano_last_sustain_ms = 0;
+    if (piano_stage == PianoStage::Play) {
+      piano_last_note = "-";
+      piano_status = "Tap card to play";
+      drawPianoPlayDiff(old_note, piano_active_note_idx, true);
+    }
+    return;
+  }
+
+  const String card_key = buildPianoCardKey(card);
+  if (card_key.isEmpty()) return;
+
+  if (piano_stage == PianoStage::Config) {
+    if (card_key == piano_active_card_key) return;
+    piano_active_card_key = card_key;
+
+    for (uint8_t i = 0; i < piano_config_step; ++i) {
+      if (piano_card_map[i] == card_key) {
+        piano_status = "Card already used";
+        drawScreen();
+        return;
+      }
+    }
+
+    piano_card_map[piano_config_step] = card_key;
+    playTone(kPianoFreq[piano_config_step], 120);
+    piano_last_note = kPianoNoteName[piano_config_step];
+    ++piano_config_step;
+
+    if (piano_config_step >= kPianoNoteCount) {
+      savePianoConfig();
+      piano_stage = PianoStage::Menu;
+      piano_menu_index = 0;
+      piano_status = "Config saved 8/8";
+    } else {
+      piano_status = String("Saved ") + String(piano_config_step) + "/8";
+    }
+    drawScreen();
+    return;
+  }
+
+  const int8_t note_idx = findPianoNoteByCard(card_key);
+  const bool same_card = (card_key == piano_active_card_key);
+  piano_active_card_key = card_key;
+
+  if (note_idx < 0) {
+    const int8_t old_note = piano_active_note_idx;
+    piano_last_note = "-";
+    piano_active_note_idx = -1;
+    piano_status = "Card not mapped";
+    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
+    return;
+  }
+
+  const int8_t old_note = piano_active_note_idx;
+  const bool new_note = (note_idx != piano_active_note_idx);
+  const bool need_retrigger = !same_card || new_note || (now - piano_last_sustain_ms >= kPianoSustainRetriggerMs);
+  if (need_retrigger) {
+    playTone(kPianoFreq[note_idx], kPianoSustainToneMs);
+    piano_last_sustain_ms = now;
+  }
+
+  const bool note_changed = (piano_active_note_idx != note_idx) || (piano_last_note != kPianoNoteName[note_idx]);
+  piano_active_note_idx = note_idx;
+  piano_last_note = kPianoNoteName[note_idx];
+  piano_status = "Play " + String(kPianoNoteName[note_idx]);
+  if (note_changed) {
+    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -2601,6 +3161,23 @@ void setup() {
   drawScreen();
 
   runBootDebugFlow();
+
+  // Start NFC worker task on Core 0
+  nfc_mutex = xSemaphoreCreateMutex();
+  nfc_cmd_queue = xQueueCreate(4, sizeof(NfcCmd));
+  // Sync initial UI state to worker
+  nfc_w_in_home = in_home;
+  nfc_w_card_valid = last_card.valid;
+  xTaskCreatePinnedToCore(
+    nfcWorkerTask,    // task function
+    "nfc_worker",     // name
+    4096,             // stack size
+    nullptr,          // param
+    1,                // priority
+    &nfc_task_handle, // handle
+    0                 // Core 0
+  );
+  Serial.println("[BOOT] NFC worker started on Core 0");
 }
 
 void loop() {
@@ -2618,15 +3195,26 @@ void loop() {
     btn_hold_latched = false;
   }
   emitHeartbeat();
-  maintainNfcConnection();
-  autoScanNdef();
+  // NFC I2C ops now run on Core 0 worker — just process results here
+  processHealthResult();
+  processNdefResult();
 
+  // Sync UI state to NFC worker
+  nfc_w_in_home = in_home;
+  nfc_w_is_reader_page = (!in_home && menu_page == MenuPage::Reader);
+  nfc_w_is_ndef_page = (!in_home && menu_page == MenuPage::ReadNDEF);
+  nfc_w_is_piano_page = (!in_home && menu_page == MenuPage::Piano);
+  nfc_w_reader_14b_only = reader_14b_only;
+  nfc_w_card_valid = last_card.valid;
+  nfc_w_wifi_popup = wifi_popup;
+  nfc_w_piano_stage = piano_stage;
+
+  const bool reader_anim_active = (!in_home && menu_page == MenuPage::Reader && !last_card.valid && nfc_ready);
   if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
-    const bool anim_running = (!last_card.valid && menu_page == MenuPage::Reader);
+    const bool anim_running = reader_anim_active;
     if (ui_marquee_active || anim_running) {
       const uint32_t now = millis();
-      // 动画跑的时候更快一些，比如 20ms 一帧
-      const uint32_t interval = (anim_running && !ui_marquee_active) ? 6 : kUiScrollMs;
+      const uint32_t interval = (anim_running && !ui_marquee_active) ? 4 : kUiScrollMs;
       if (now - last_ui_scroll_ms >= interval) {
         last_ui_scroll_ms = now;
         if (anim_running && !ui_marquee_active) {
@@ -2847,11 +3435,12 @@ void loop() {
     }
   }
 
+  // Process NFC worker results for Reader / Piano (non-blocking)
   if (menu_page == MenuPage::Reader && !in_home) {
-    handleReader();
+    processReaderResult();
   } else if (menu_page == MenuPage::Piano && !in_home) {
-    handlePiano();
+    processPianoResult();
   }
 
-  delay(10);
+  delay(reader_anim_active ? 1 : 10);
 }
