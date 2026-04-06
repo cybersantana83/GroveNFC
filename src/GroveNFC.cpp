@@ -90,11 +90,6 @@ bool GroveNFC::begin() {
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
   stopRF();
-  writeMifare1KImage();
-  writeNtag213Image();
-  writeNtag215Image();
-  writeNtag216Image();
-  writeISO15Image();
   return true;
 }
 
@@ -704,13 +699,20 @@ bool GroveNFC::readISO15(CardInfo& card) {
   writeSysReg(I2cSysReg_SetRFConfig_Addr, SYS_REG_RFCONFIG_READER_ISO15_26K_ASK100 | SYS_REG_RFCONFIG_TAG_ISO15693_26K_ASK);
   writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_ISO15_ENABLE);
   writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_ISO15_ENABLE);
+  writeMiscReg(I2cMiscReg_SetTxLastBit_Addr, MISC_REG_TXLASTBIT_0);
   writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_ON);
   delay(5);
 
   uint8_t rx[64] = {0};
   uint16_t rx_len = sizeof(rx);
   uint8_t inv[] = {0x26, 0x01, 0x00};
-  if (!txrx(inv, sizeof(inv), rx, rx_len, 15) || rx_len < 10) return false;
+  if (!txrx(inv, sizeof(inv), rx, rx_len, 15) || rx_len < 10) {
+    // Some ISO15693 cards answer slower; retry once with a longer wait window.
+    writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_ON);
+    delay(4);
+    rx_len = sizeof(rx);
+    if (!txrx(inv, sizeof(inv), rx, rx_len, 100) || rx_len < 10) return false;
+  }
 
   card.protocol = "ISO15693";
   card.uid = bytesToHex(&rx[2], 8, true);
