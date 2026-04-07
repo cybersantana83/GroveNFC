@@ -529,6 +529,7 @@ bool GroveNFC::readISO14A(CardInfo& card) {
   uint16_t rx_len = sizeof(rx);
   uint8_t reqa[] = {0x52};
   if (!txrx(reqa, sizeof(reqa), rx, rx_len, 10)) return false;
+  uint8_t atqa[2] = {rx[0], rx[1]};
 
   writeMiscReg(I2cMiscReg_SetTxLastBit_Addr, MISC_REG_TXLASTBIT_0);
   uint8_t anticollision[] = {0x93, 0x20};
@@ -544,35 +545,116 @@ bool GroveNFC::readISO14A(CardInfo& card) {
   uint8_t select1[] = {0x93, 0x70, uid_part1[0], uid_part1[1], uid_part1[2], uid_part1[3], bcc1};
   rx_len = sizeof(rx);
   if (!txrx(select1, sizeof(select1), rx, rx_len, 10)) return false;
+  uint8_t sak = rx[0];
 
   bool cascade = (uid_part1[0] == 0x88);
+  uint8_t uid_buf[7];
+  size_t uid_len;
+
   if (!cascade) {
+    memcpy(uid_buf, uid_part1, 4);
+    uid_len = 4;
+  } else {
+    writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_DISABLE);
+    writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_DISABLE);
+    uint8_t anticollision2[] = {0x95, 0x20};
+    rx_len = sizeof(rx);
+    if (!txrx(anticollision2, sizeof(anticollision2), rx, rx_len, 10) || rx_len < 5) return false;
+
+    uint8_t cl2[4] = {rx[0], rx[1], rx[2], rx[3]};
+    uint8_t bcc2 = rx[4];
+
+    writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14A_ENABLE);
+    writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_14A_ENABLE);
+    uint8_t select2[] = {0x95, 0x70, cl2[0], cl2[1], cl2[2], cl2[3], bcc2};
+    rx_len = sizeof(rx);
+    if (!txrx(select2, sizeof(select2), rx, rx_len, 10)) return false;
+    sak = rx[0];
+
+    uid_buf[0] = uid_part1[1]; uid_buf[1] = uid_part1[2]; uid_buf[2] = uid_part1[3];
+    uid_buf[3] = cl2[0]; uid_buf[4] = cl2[1]; uid_buf[5] = cl2[2]; uid_buf[6] = cl2[3];
+    uid_len = 7;
+  }
+
+  card.uid = bytesToHex(uid_buf, uid_len);
+  card.valid = true;
+
+  // ---------- Identify card subtype by SAK ----------
+  char sak_hex[8];
+  snprintf(sak_hex, sizeof(sak_hex), "SAK:%02X", sak);
+
+  if (sak == 0x08) {
+    card.protocol = "MFC1K";
+    card.detail = String(sak_hex) + " MIFARE Classic 1K";
+    return true;
+  }
+  if (sak == 0x18) {
+    card.protocol = "MFC4K";
+    card.detail = String(sak_hex) + " MIFARE Classic 4K";
+    return true;
+  }
+  if (sak == 0x09) {
+    card.protocol = "MFCMini";
+    card.detail = String(sak_hex) + " MIFARE Classic Mini";
+    return true;
+  }
+  if (sak == 0x10) {
+    card.protocol = "MFPlus2K";
+    card.detail = String(sak_hex) + " MIFARE Plus 2K";
+    return true;
+  }
+  if (sak == 0x11) {
+    card.protocol = "MFPlus4K";
+    card.detail = String(sak_hex) + " MIFARE Plus 4K";
+    return true;
+  }
+  if (sak == 0x20) {
     card.protocol = "ISO14443A";
-    card.uid = bytesToHex(uid_part1, 4);
-    card.valid = true;
-    card.detail = "4-byte UID";
+    card.detail = String(sak_hex) + " DESFire/JCOP";
     return true;
   }
 
-  writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_DISABLE);
-  writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_DISABLE);
-  uint8_t anticollision2[] = {0x95, 0x20};
-  rx_len = sizeof(rx);
-  if (!txrx(anticollision2, sizeof(anticollision2), rx, rx_len, 10) || rx_len < 5) return false;
+  // SAK=0x00: NTAG / Ultralight family — use GET_VERSION (0x60)
+  if (sak == 0x00) {
+    uint8_t get_ver[] = {0x60};
+    rx_len = sizeof(rx);
+    if (txrx(get_ver, sizeof(get_ver), rx, rx_len, 15) && rx_len >= 8) {
+      uint8_t ic_type    = rx[2];  // 0x03=UL, 0x04=NTAG
+      uint8_t storage_sz = rx[6];
+      if (ic_type == 0x04) {
+        // NTAG family
+        if (storage_sz == 0x0F) { card.protocol = "NTAG213"; card.detail = String(sak_hex) + " NTAG213 (144B)"; }
+        else if (storage_sz == 0x11) { card.protocol = "NTAG215"; card.detail = String(sak_hex) + " NTAG215 (504B)"; }
+        else if (storage_sz == 0x13) { card.protocol = "NTAG216"; card.detail = String(sak_hex) + " NTAG216 (888B)"; }
+        else { card.protocol = "NTAG"; card.detail = String(sak_hex) + " NTAG stor=0x" + String(storage_sz, HEX); }
+      } else if (ic_type == 0x03) {
+        // Ultralight family
+        if (storage_sz == 0x0B) { card.protocol = "MFUL11"; card.detail = String(sak_hex) + " MF Ultralight EV1 (48B)"; }
+        else if (storage_sz == 0x0E) { card.protocol = "MFUL21"; card.detail = String(sak_hex) + " MF Ultralight EV1 (128B)"; }
+        else if (storage_sz == 0x06) { card.protocol = "MFUL"; card.detail = String(sak_hex) + " MF Ultralight (64B)"; }
+        else { card.protocol = "MFUL"; card.detail = String(sak_hex) + " UL stor=0x" + String(storage_sz, HEX); }
+      } else {
+        card.protocol = "ISO14443A";
+        card.detail = String(sak_hex) + " Type2 ic=0x" + String(ic_type, HEX);
+      }
+      return true;
+    }
+    // GET_VERSION failed — likely NTAG203 or Ultralight-C
+    // Try to distinguish by reading page 0x29 (UL-C has 3DES config there)
+    uint8_t pg[16] = {0};
+    if (type2ReadBlock(0x29, pg)) {
+      card.protocol = "MFUL-C";
+      card.detail = String(sak_hex) + " MF Ultralight C";
+    } else {
+      card.protocol = "NTAG203";
+      card.detail = String(sak_hex) + " NTAG203";
+    }
+    return true;
+  }
 
-  uint8_t uid7[7] = {uid_part1[1], uid_part1[2], uid_part1[3], rx[0], rx[1], rx[2], rx[3]};
-  uint8_t bcc2 = rx[4];
-
-  writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14A_ENABLE);
-  writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_14A_ENABLE);
-  uint8_t select2[] = {0x95, 0x70, rx[0], rx[1], rx[2], rx[3], bcc2};
-  rx_len = sizeof(rx);
-  if (!txrx(select2, sizeof(select2), rx, rx_len, 10)) return false;
-
+  // Fallback: unknown SAK
   card.protocol = "ISO14443A";
-  card.uid = bytesToHex(uid7, 7);
-  card.valid = true;
-  card.detail = "7-byte UID";
+  card.detail = String(sak_hex) + " " + String(uid_len) + "-byte UID";
   return true;
 }
 

@@ -276,7 +276,8 @@ void playCardTone(const String& protocol) {
   s_scale_step = static_cast<uint8_t>((s_scale_step + 1) % 8);
   (void)protocol;
 #else
-  if (protocol == "ISO14443A") {
+  if (protocol == "ISO14443A" || protocol.startsWith("MFC") || protocol.startsWith("MFP")
+      || protocol.startsWith("NTAG") || protocol.startsWith("MFUL")) {
     playTone(1480, 70);
   } else if (protocol == "ISO14443B") {
     playTone(1318, 70);
@@ -387,6 +388,19 @@ const char* protocolShort(const String& protocol) {
   if (protocol == "ISO14443B") return "14B";
   if (protocol == "ISO15693") return "15";
   if (protocol == "FeliCa") return "FLC";
+  if (protocol == "MFC1K") return "1K";
+  if (protocol == "MFC4K") return "4K";
+  if (protocol == "MFCMini") return "Mini";
+  if (protocol.startsWith("MFP")) return "MF+";
+  if (protocol == "NTAG213") return "N213";
+  if (protocol == "NTAG215") return "N215";
+  if (protocol == "NTAG216") return "N216";
+  if (protocol == "NTAG203") return "N203";
+  if (protocol == "NTAG") return "NTAG";
+  if (protocol == "MFUL11") return "UL11";
+  if (protocol == "MFUL21") return "UL21";
+  if (protocol == "MFUL-C") return "UL-C";
+  if (protocol == "MFUL") return "UL";
   return "---";
 }
 
@@ -395,6 +409,20 @@ const char* protocolFull(const String& protocol) {
   if (protocol == "ISO14443B") return "ISO14443B";
   if (protocol == "ISO15693") return "ISO15693";
   if (protocol == "FeliCa") return "Felica";
+  if (protocol == "MFC1K") return "MF Classic 1K";
+  if (protocol == "MFC4K") return "MF Classic 4K";
+  if (protocol == "MFCMini") return "MF Classic Mini";
+  if (protocol == "MFPlus2K") return "MF Plus 2K";
+  if (protocol == "MFPlus4K") return "MF Plus 4K";
+  if (protocol == "NTAG213") return "NTAG213";
+  if (protocol == "NTAG215") return "NTAG215";
+  if (protocol == "NTAG216") return "NTAG216";
+  if (protocol == "NTAG203") return "NTAG203";
+  if (protocol == "NTAG") return "NTAG";
+  if (protocol == "MFUL11") return "MF UL EV1-11";
+  if (protocol == "MFUL21") return "MF UL EV1-21";
+  if (protocol == "MFUL") return "MF Ultralight";
+  if (protocol == "MFUL-C") return "MF UL-C";
   return "Unknown";
 }
 
@@ -489,6 +517,8 @@ String protocolTag(const String& protocol) {
   if (protocol == "ISO14443B") return "14B";
   if (protocol == "ISO15693") return "15";
   if (protocol == "FeliCa") return "FEL";
+  if (protocol.startsWith("MFC") || protocol.startsWith("MFP")) return "14A";
+  if (protocol.startsWith("NTAG") || protocol.startsWith("MFUL")) return "14A";
   return protocol;
 }
 
@@ -684,91 +714,141 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
   }
 
   if (!card.valid) {
-    const int center_y = y + height / 2;
-    const int card_w = min(56, width - 20);
-    const int card_h = 30;
+    // ---------- Curtain scan box ----------
+    const int border = 3;
+    const int card_w = (width * 3) / 5;            // 3/5 screen width
+    const int card_h = min(48, height - 6);
     const int card_x = x + (width - card_w) / 2;
-    const int card_y = center_y - (card_h / 2);
+    const int card_y = y + (height - card_h) / 2;
 
+    const int inner_left = card_x + border;
+    const int inner_top  = card_y + border;
+    const int inner_w    = max(1, card_w - border * 2);
+    const int inner_h    = max(1, card_h - border * 2);
+    const int line_gap   = 3;                       // gap between line and border
+    const int line_top   = inner_top + line_gap;
+    const int line_h     = max(1, inner_h - line_gap * 2);
+    const int travel     = max(1, inner_w - 2);
+
+    static const char* kProtoLabels[] = {"ISO14443A", "ISO14443B", "ISO15693", "Felica"};
+    static constexpr int kProtoCount = 4;
+    static int proto_idx = 0;
+
+    static float progress = 0.0f;
+    static int phase = 0;           // 0=opening, 1=closing
+    static uint32_t last_step_ms = 0;
+    static int prev_scan_pos = -1;
+    static bool initialized = false;
+
+    const uint32_t now_ms = millis();
+    const uint32_t cycle_ms = 800;
+
+    if (!initialized) {
+      progress = 0.0f;
+      phase = 0;
+      last_step_ms = now_ms;
+      prev_scan_pos = -1;
+      initialized = true;
+    } else if (anim_only) {
+      const uint32_t elapsed = now_ms - last_step_ms;
+      last_step_ms = now_ms;
+      float dt = static_cast<float>(elapsed) / static_cast<float>(cycle_ms);
+      progress += dt;
+      if (progress >= 1.0f) {
+        progress = 0.0f;
+        if (phase == 1) {
+          proto_idx = (proto_idx + 1) % kProtoCount;
+          phase = 0;
+        } else {
+          phase = 1;
+        }
+      }
+    }
+
+    // Ease-in-out: smoothstep 3t²-2t³
+    float t = progress;
+    float eased = t * t * (3.0f - 2.0f * t);
+    int scan_pos;
+    if (phase == 0) {
+      scan_pos = static_cast<int>(eased * travel);
+    } else {
+      scan_pos = travel - static_cast<int>(eased * travel);
+    }
+    if (scan_pos < 0) scan_pos = 0;
+    if (scan_pos > travel) scan_pos = travel;
+    const int scan_x = inner_left + scan_pos;
+
+    // --- Draw border (only on full refresh) ---
     if (!anim_only) {
       const uint16_t c1 = scaleColor565(accent, 220);
       const uint16_t c2 = scaleColor565(accent, 170);
-      // Pixel-style rectangle.
+      const uint16_t c3 = scaleColor565(accent, 120);
       d.drawRect(card_x, card_y, card_w, card_h, c1);
       d.drawRect(card_x + 1, card_y + 1, card_w - 2, card_h - 2, c2);
-      d.fillRect(card_x, card_y, 3, 3, TFT_BLACK);
-      d.fillRect(card_x + card_w - 3, card_y, 3, 3, TFT_BLACK);
-      d.fillRect(card_x, card_y + card_h - 3, 3, 3, TFT_BLACK);
-      d.fillRect(card_x + card_w - 3, card_y + card_h - 3, 3, 3, TFT_BLACK);
+      d.drawRect(card_x + 2, card_y + 2, card_w - 4, card_h - 4, c3);
+      const int rc = 5;
+      d.fillRect(card_x, card_y, rc, 1, TFT_BLACK);
+      d.fillRect(card_x, card_y, 1, rc, TFT_BLACK);
+      d.fillRect(card_x + 1, card_y + 1, 2, 1, TFT_BLACK);
+      d.fillRect(card_x + 1, card_y + 1, 1, 2, TFT_BLACK);
+      d.fillRect(card_x + card_w - rc, card_y, rc, 1, TFT_BLACK);
+      d.fillRect(card_x + card_w - 1, card_y, 1, rc, TFT_BLACK);
+      d.fillRect(card_x + card_w - 3, card_y + 1, 2, 1, TFT_BLACK);
+      d.fillRect(card_x + card_w - 2, card_y + 1, 1, 2, TFT_BLACK);
+      d.fillRect(card_x, card_y + card_h - 1, rc, 1, TFT_BLACK);
+      d.fillRect(card_x, card_y + card_h - rc, 1, rc, TFT_BLACK);
+      d.fillRect(card_x + 1, card_y + card_h - 2, 2, 1, TFT_BLACK);
+      d.fillRect(card_x + 1, card_y + card_h - 3, 1, 2, TFT_BLACK);
+      d.fillRect(card_x + card_w - rc, card_y + card_h - 1, rc, 1, TFT_BLACK);
+      d.fillRect(card_x + card_w - 1, card_y + card_h - rc, 1, rc, TFT_BLACK);
+      d.fillRect(card_x + card_w - 3, card_y + card_h - 2, 2, 1, TFT_BLACK);
+      d.fillRect(card_x + card_w - 2, card_y + card_h - 3, 1, 2, TFT_BLACK);
+      // Full redraw of inner area + current text state
+      d.fillRect(inner_left, inner_top, inner_w, inner_h, TFT_BLACK);
+      prev_scan_pos = -1;
     }
 
-    // Pixel-style scanning band (bright core + dim tails) bouncing left-right.
-    static int last_scan_x = -1;
-    static int scan_pos = 0;
-    static int scan_dir = 1;  // 1: left->right, -1: right->left
-    static uint32_t last_step_ms = 0;
-    static uint32_t scan_frac_num = 0;  // 小数步进累计，保证恒速
-    const int inner_left = card_x + 4;
-    const int inner_w = max(1, card_w - 8);
-    const int travel = max(1, inner_w - 2);
-    const uint32_t now_ms = millis();
-    const uint8_t speed_mul = 1;     // 扫描速度倍率(1x，双核后无需加速补偿)
-    const uint32_t cycle_ms = 1800;  // 左->右->左一整趟(ms)
-    const uint32_t half_cycle_ms = (cycle_ms / 2 == 0) ? 1 : (cycle_ms / 2);
+    // --- Delta update: only repaint changed region to eliminate flicker ---
+    d.setFont(&fonts::Font0);
+    d.setTextSize(2);
+    d.setTextWrap(false);
+    const char* label = kProtoLabels[proto_idx];
+    int16_t tw = d.textWidth(label);
+    int16_t th = d.fontHeight();
+    int text_x = inner_left + (inner_w - tw) / 2;
+    int text_y = inner_top + (inner_h - th) / 2;
+    uint16_t text_color = scaleColor565(accent, 180);
 
-    if (!anim_only || scan_pos < 0 || scan_pos > travel) {
-      // 完整刷新或状态重建时，稳定从左侧开始
-      scan_pos = 0;
-      scan_dir = 1;
-      last_step_ms = now_ms;
-      scan_frac_num = 0;
-    } else {
-      const uint32_t elapsed = now_ms - last_step_ms;
-      if (elapsed > 0) {
-        // 恒速推进：按真实经过时间计算应前进像素，掉帧时补齐，不会“半途变慢”
-        uint64_t adv_num = static_cast<uint64_t>(scan_frac_num) +
-                           static_cast<uint64_t>(elapsed) * static_cast<uint64_t>(travel) * static_cast<uint64_t>(speed_mul);
-        uint32_t advance_px = static_cast<uint32_t>(adv_num / half_cycle_ms);
-        scan_frac_num = static_cast<uint32_t>(adv_num % half_cycle_ms);
+    if (prev_scan_pos >= 0 && scan_pos != prev_scan_pos) {
+      int old_x = inner_left + prev_scan_pos;
+      int dirty_left = min(old_x, scan_x);
+      int dirty_right = max(old_x + 2, scan_x + 2);
+      int dirty_w = dirty_right - dirty_left;
 
-        const uint32_t period = static_cast<uint32_t>(travel * 2);
-        if (period > 0 && advance_px > period) {
-          advance_px %= period;
-        }
-        while (advance_px--) {
-          scan_pos += scan_dir;
-          if (scan_pos >= travel) {
-            scan_pos = travel;
-            scan_dir = -1;
-          } else if (scan_pos <= 0) {
-            scan_pos = 0;
-            scan_dir = 1;
-          }
-        }
-        last_step_ms = now_ms;
+      if (phase == 0) {
+        d.setClipRect(dirty_left, inner_top, dirty_w, inner_h);
+        d.fillRect(dirty_left, inner_top, dirty_w, inner_h, TFT_BLACK);
+        d.setTextColor(text_color);
+        d.setCursor(text_x, text_y);
+        d.print(label);
+        d.clearClipRect();
+      } else {
+        d.fillRect(dirty_left, inner_top, dirty_w, inner_h, TFT_BLACK);
+      }
+    } else if (prev_scan_pos < 0) {
+      // Full refresh: draw entire current text state
+      if (phase == 0 && scan_pos > 0) {
+        d.setClipRect(inner_left, inner_top, scan_pos, inner_h);
+        d.setTextColor(text_color);
+        d.setCursor(text_x, text_y);
+        d.print(label);
+        d.clearClipRect();
       }
     }
-    const int scan_x = inner_left + scan_pos;
 
-    if (scan_x != last_scan_x || !anim_only) {
-      if (anim_only && last_scan_x >= inner_left) {
-        // 局部刷新：擦除上一帧扫描带（4px宽）
-        const int old_band_x = max(inner_left, last_scan_x - 1);
-        const int old_band_r = min(inner_left + travel + 1, last_scan_x + 2);
-        d.fillRect(old_band_x, card_y + 3, old_band_r - old_band_x + 1, card_h - 6, TFT_BLACK);
-      } else if (!anim_only) {
-        last_scan_x = -1; // 完整刷新时重置
-      }
-
-      const uint16_t tail = scaleColor565(TFT_WHITE, 110);
-      const int band_x = max(inner_left, scan_x - 1);
-      const int band_r = min(inner_left + travel + 1, scan_x + 2);
-      for (int px = band_x; px <= band_r; ++px) {
-        const bool is_core = (px >= scan_x && px <= scan_x + 1);
-        d.fillRect(px, card_y + 3, 1, card_h - 6, is_core ? TFT_WHITE : tail);
-      }
-      last_scan_x = scan_x;
-    }
+    // Draw curtain line (shorter, with gap from border)
+    d.fillRect(scan_x, line_top, 2, line_h, TFT_WHITE);
+    prev_scan_pos = scan_pos;
     return;
   }
 
