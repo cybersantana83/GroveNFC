@@ -277,7 +277,7 @@ void playCardTone(const String& protocol) {
   (void)protocol;
 #else
   if (protocol == "ISO14443A" || protocol.startsWith("MFC") || protocol.startsWith("MFP")
-      || protocol.startsWith("NTAG") || protocol.startsWith("MFUL")) {
+      || protocol.startsWith("NTAG") || protocol.startsWith("MFUL") || protocol == "DESFire") {
     playTone(1480, 70);
   } else if (protocol == "ISO14443B") {
     playTone(1318, 70);
@@ -401,6 +401,7 @@ const char* protocolShort(const String& protocol) {
   if (protocol == "MFUL21") return "UL21";
   if (protocol == "MFUL-C") return "UL-C";
   if (protocol == "MFUL") return "UL";
+  if (protocol == "DESFire") return "DSF";
   return "---";
 }
 
@@ -409,20 +410,21 @@ const char* protocolFull(const String& protocol) {
   if (protocol == "ISO14443B") return "ISO14443B";
   if (protocol == "ISO15693") return "ISO15693";
   if (protocol == "FeliCa") return "Felica";
-  if (protocol == "MFC1K") return "MF Classic 1K";
-  if (protocol == "MFC4K") return "MF Classic 4K";
-  if (protocol == "MFCMini") return "MF Classic Mini";
-  if (protocol == "MFPlus2K") return "MF Plus 2K";
-  if (protocol == "MFPlus4K") return "MF Plus 4K";
+  if (protocol == "MFC1K") return "MFC 1K";
+  if (protocol == "MFC4K") return "MFC 4K";
+  if (protocol == "MFCMini") return "MFC Mini";
+  if (protocol == "MFPlus2K") return "MF+ 2K";
+  if (protocol == "MFPlus4K") return "MF+ 4K";
   if (protocol == "NTAG213") return "NTAG213";
   if (protocol == "NTAG215") return "NTAG215";
   if (protocol == "NTAG216") return "NTAG216";
   if (protocol == "NTAG203") return "NTAG203";
   if (protocol == "NTAG") return "NTAG";
-  if (protocol == "MFUL11") return "MF UL EV1-11";
-  if (protocol == "MFUL21") return "MF UL EV1-21";
-  if (protocol == "MFUL") return "MF Ultralight";
-  if (protocol == "MFUL-C") return "MF UL-C";
+  if (protocol == "MFUL11") return "MFUL11";
+  if (protocol == "MFUL21") return "MFUL21";
+  if (protocol == "MFUL") return "MFUL";
+  if (protocol == "MFUL-C") return "MFUL-C";
+  if (protocol == "DESFire") return "DESFire";
   return "Unknown";
 }
 
@@ -519,6 +521,7 @@ String protocolTag(const String& protocol) {
   if (protocol == "FeliCa") return "FEL";
   if (protocol.startsWith("MFC") || protocol.startsWith("MFP")) return "14A";
   if (protocol.startsWith("NTAG") || protocol.startsWith("MFUL")) return "14A";
+  if (protocol == "DESFire") return "14A";
   return protocol;
 }
 
@@ -716,7 +719,11 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
   if (!card.valid) {
     // ---------- Curtain scan box ----------
     const int border = 3;
-    const int card_w = (width * 3) / 5;            // 3/5 screen width
+#ifdef APP_TARGET_ATOMS3
+    const int card_w = width;                   // square screen
+#else
+    const int card_w = (width * 3) / 5;             // 3/5 screen width
+#endif
     const int card_h = min(48, height - 6);
     const int card_x = x + (width - card_w) / 2;
     const int card_y = y + (height - card_h) / 2;
@@ -749,7 +756,8 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
       last_step_ms = now_ms;
       prev_scan_pos = -1;
       initialized = true;
-    } else if (anim_only) {
+    } else {
+      // Always advance animation regardless of anim_only
       const uint32_t elapsed = now_ms - last_step_ms;
       last_step_ms = now_ms;
       float dt = static_cast<float>(elapsed) / static_cast<float>(cycle_ms);
@@ -862,23 +870,21 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
   d.setTextSize(2);
 
   const int type_w = d.textWidth(type_text);
-  const int id_w = d.textWidth(id_text);
   const int type_x = x + (width - type_w) / 2;
-  const int id_x = x + (width - id_w) / 2;
   const int center_y = y + height / 2;
   const int type_y = center_y - 18;
-  const int id_y = center_y + 4;
 
   d.setTextColor(accent, TFT_BLACK);
   d.setCursor(type_x, type_y);
   d.print(type_text);
 
+#ifndef APP_TARGET_ATOMS3
+  // Left/right chunky arrows pointing inward (skip on small square screen)
   const int deco_gap = 6;
   const int deco_y = type_y + 1;
   const int left_deco_x = type_x - deco_gap - 12;
   const int right_deco_x = type_x + type_w + deco_gap;
   if (left_deco_x >= x + 1 && right_deco_x + 12 <= x + width - 1) {
-    // Left/right chunky arrows pointing inward.
     d.fillRect(left_deco_x + 1, deco_y + 2, 3, 10, accent);
     d.fillRect(left_deco_x + 4, deco_y + 4, 3, 6, accent);
     d.fillRect(left_deco_x + 7, deco_y + 6, 3, 2, accent);
@@ -887,10 +893,44 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
     d.fillRect(right_deco_x + 5, deco_y + 4, 3, 6, accent);
     d.fillRect(right_deco_x + 2, deco_y + 6, 3, 2, accent);
   }
+#endif
 
+#ifdef APP_TARGET_ATOMS3
+  // On AtomS3: wrap long ID text across multiple lines
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  {
+    const int id_y = center_y + 4;
+    const int max_w = width - 4;  // usable width with small margin
+    const int font_h = d.fontHeight();
+    // Split id_text into lines that fit
+    String remaining = id_text;
+    int cur_y = id_y;
+    while (remaining.length() > 0 && cur_y + font_h <= y + height) {
+      // Find how many chars fit in max_w
+      int fit = remaining.length();
+      for (int i = 1; i <= (int)remaining.length(); i++) {
+        if (d.textWidth(remaining.substring(0, i)) > max_w) {
+          fit = i - 1;
+          break;
+        }
+      }
+      if (fit <= 0) fit = 1;
+      String line = remaining.substring(0, fit);
+      remaining = remaining.substring(fit);
+      int lw = d.textWidth(line);
+      d.setCursor(x + (width - lw) / 2, cur_y);
+      d.print(line);
+      cur_y += font_h + 2;
+    }
+  }
+#else
+  const int id_w = d.textWidth(id_text);
+  const int id_x = x + (width - id_w) / 2;
+  const int id_y = center_y + 4;
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   d.setCursor(id_x, id_y);
   d.print(id_text);
+#endif
 }
 
 void drawPianoKeyboard(lgfx::v1::LGFXBase& d,
@@ -3310,6 +3350,8 @@ void loop() {
           } else {
             drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
           }
+#elif defined(APP_TARGET_ATOMS3)
+          drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
 #endif
         } else {
           drawScreen();

@@ -609,8 +609,13 @@ bool GroveNFC::readISO14A(CardInfo& card) {
     return true;
   }
   if (sak == 0x20) {
-    card.protocol = "ISO14443A";
+    card.protocol = "DESFire";
     card.detail = String(sak_hex) + " DESFire/JCOP";
+    return true;
+  }
+  if (sak == 0x28) {
+    card.protocol = "DESFire";
+    card.detail = String(sak_hex) + " DESFire/JCOP (CL2)";
     return true;
   }
 
