@@ -1,4 +1,7 @@
 #include <M5Unified.h>
+#if defined(APP_TARGET_CARDPUTER)
+#include <M5Cardputer.h>
+#endif
 #include <Preferences.h>
 #include <Wire.h>
 #include <WiFi.h>
@@ -16,6 +19,10 @@ namespace {
 constexpr int kSdaPin = 9;
 constexpr int kSclPin = 10;
 constexpr uint8_t kEmuMenuVisibleCount = 5;
+#elif defined(APP_TARGET_CARDPUTER)
+constexpr int kSdaPin = 2;
+constexpr int kSclPin = 1;
+constexpr uint8_t kEmuMenuVisibleCount = 5;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr int kSdaPin = 32;
 constexpr int kSclPin = 33;
@@ -28,12 +35,16 @@ constexpr uint8_t kEmuMenuVisibleCount = 4;
 constexpr uint32_t kI2CFreq = 400000;
 #if defined(APP_TARGET_STICKS3)
 constexpr uint32_t kPollIntervalMs = 120;
+#elif defined(APP_TARGET_CARDPUTER)
+constexpr uint32_t kPollIntervalMs = 120;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kPollIntervalMs = 140;
 #else
 constexpr uint32_t kPollIntervalMs = 220;
 #endif
 #if defined(APP_TARGET_STICKS3)
+constexpr uint32_t kReaderHoldCheckMs = 650;
+#elif defined(APP_TARGET_CARDPUTER)
 constexpr uint32_t kReaderHoldCheckMs = 650;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kReaderHoldCheckMs = 700;
@@ -44,6 +55,8 @@ constexpr uint32_t kHeartbeatMs = 2000;
 constexpr uint32_t kNfcHealthCheckMs = 3000;
 constexpr uint32_t kNfcReconnectMs = 1500;
 #if defined(APP_TARGET_STICKS3)
+constexpr uint32_t kNdefAutoPollMs = 520;
+#elif defined(APP_TARGET_CARDPUTER)
 constexpr uint32_t kNdefAutoPollMs = 520;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kNdefAutoPollMs = 650;
@@ -56,13 +69,13 @@ constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
 constexpr bool kAutoBootDebug = true;
 constexpr uint32_t kBootDebugShowMs = 2500;
-#if defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_STICKS3)
+#if defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_STICKS3) || defined(APP_TARGET_CARDPUTER)
 constexpr uint8_t kSpeakerVolume = 160;
 #else
 constexpr uint8_t kSpeakerVolume = 160;
 #endif
 constexpr uint8_t kEmuActionCount = 2;
-#if defined(APP_TARGET_STICKS3)
+#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_CARDPUTER)
 constexpr uint32_t kHoldPressMs = 520;
 constexpr uint32_t kNfcBootPowerSettleMs = 220;
 constexpr uint8_t kNfcBootRetryCount = 5;
@@ -257,6 +270,75 @@ inline bool mainButtonPressedFor(uint32_t ms) {
 inline bool mainButtonReleased() {
   return M5.BtnA.wasReleased();
 }
+
+struct KeyNavState {
+  bool next = false;
+  bool prev = false;
+  bool confirm = false;
+  bool back = false;
+  bool cancel = false;
+};
+
+#if defined(APP_TARGET_CARDPUTER)
+KeyNavState readKeyNavState() {
+  KeyNavState nav;
+  if (!(M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())) {
+    return nav;
+  }
+
+  auto& ks = M5Cardputer.Keyboard.keysState();
+  if (ks.enter) nav.confirm = true;
+  if (ks.del) {
+    nav.back = true;
+    nav.cancel = true;
+  }
+
+  for (const auto c : ks.word) {
+    switch (c) {
+      case 'w':
+      case 'W':
+      case 'a':
+      case 'A':
+      case 'h':
+      case 'H':
+      case 'i':
+      case 'I':
+      case 'k':
+      case 'K':
+      case ';':
+      case ',':
+        nav.prev = true;
+        break;
+      case 's':
+      case 'S':
+      case 'd':
+      case 'D':
+      case 'j':
+      case 'J':
+      case 'l':
+      case 'L':
+      case '.':
+      case '/':
+        nav.next = true;
+        break;
+      case 0x1B:
+      case '`':
+      case '~':
+        nav.back = true;
+        nav.cancel = true;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return nav;
+}
+#else
+KeyNavState readKeyNavState() {
+  return KeyNavState{};
+}
+#endif
 
 void playTone(uint16_t freq, uint16_t ms) {
   M5.Speaker.tone(freq, ms);
@@ -2142,7 +2224,7 @@ bool initNfcAtBoot() {
     Serial.printf("[BOOT] NFC init attempt %u/%u failed\n", attempt, kNfcBootRetryCount);
     delay(kNfcBootRetryDelayMs);
 
-#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
+#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER)
     Wire.begin(kSdaPin, kSclPin, kI2CFreq);
     delay(5);
 #endif
@@ -3238,7 +3320,11 @@ void setup() {
 #if defined(APP_TARGET_STICKCPLUS)
   cfg.internal_spk = true;
 #endif
+#if defined(APP_TARGET_CARDPUTER)
+  M5Cardputer.begin(cfg, true);
+#else
   M5.begin(cfg);
+#endif
 #if defined(APP_TARGET_STICKS3)
   M5.Power.setExtOutput(true);
 #endif
@@ -3250,6 +3336,8 @@ void setup() {
   target_name = "M5StickS3";
 #elif defined(APP_TARGET_STICKCPLUS)
   target_name = "M5StickCPlus";
+#elif defined(APP_TARGET_CARDPUTER)
+  target_name = "CardPuter/CardPuterADV";
 #elif defined(APP_TARGET_ATOMS3)
   target_name = "AtomS3";
 #endif
@@ -3261,7 +3349,7 @@ void setup() {
   Wire.begin(kSdaPin, kSclPin, kI2CFreq);
 
     M5.Display.setRotation(
-  #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
+  #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER)
     1
   #else
     0
@@ -3301,7 +3389,12 @@ void setup() {
 }
 
 void loop() {
+#if defined(APP_TARGET_CARDPUTER)
+  M5Cardputer.update();
+#else
   M5.update();
+#endif
+  const KeyNavState key_nav = readKeyNavState();
   const bool clicked_raw = mainButtonClicked();
   const bool released = mainButtonReleased();
   bool clicked = clicked_raw;
@@ -3341,7 +3434,7 @@ void loop() {
           auto& d = M5.Display;
           const int w = d.width();
           const int h = d.height();
-#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
+#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER)
           if (w > h) {
             const int header_h = 18;
             const int content_top = header_h + 2;
@@ -3369,14 +3462,17 @@ void loop() {
   }
 
   if (wifi_popup) {
-    if (clicked) {
+    if (clicked || key_nav.cancel || key_nav.back) {
       wifi_popup = false;
       wifi_status = "Cancelled";
       drawScreen();
     }
-    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-      btn_hold_latched = true;
-      ignore_click_after_hold = true;
+    const bool hold_connect = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+    if (hold_connect || key_nav.confirm) {
+      if (hold_connect) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+      }
       connectWifiNow();
     }
     delay(10);
@@ -3384,14 +3480,22 @@ void loop() {
   }
 
   if (in_home) {
-    if (clicked) {
+    if (clicked || key_nav.next) {
       home_index = (home_index + 1) % static_cast<int>(MenuPage::Count);
       menu_page = kHomeOrder[home_index];
       drawScreen();
     }
-    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-      btn_hold_latched = true;
-      ignore_click_after_hold = true;
+    if (key_nav.prev) {
+      home_index = (home_index + static_cast<int>(MenuPage::Count) - 1) % static_cast<int>(MenuPage::Count);
+      menu_page = kHomeOrder[home_index];
+      drawScreen();
+    }
+    const bool hold_enter = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+    if (hold_enter || key_nav.confirm) {
+      if (hold_enter) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+      }
       enterCurrentFeature();
     }
     delay(10);
@@ -3400,7 +3504,7 @@ void loop() {
 
   if (menu_page == MenuPage::Emulator) {
     if (emu_config_stage == EmuConfigStage::TypeMenu) {
-      if (clicked) {
+      if (clicked || key_nav.next) {
         const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
         const uint8_t visible_count = kEmuMenuVisibleCount;
         uint8_t selected = emu_type_scroll + emu_type_cursor;
@@ -3426,9 +3530,31 @@ void loop() {
         }
         drawScreen(true);
       }
-      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        ignore_click_after_hold = true;
+      if (key_nav.prev) {
+        const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
+        uint8_t selected = emu_type_scroll + emu_type_cursor;
+        if (selected > 0) {
+          if (emu_type_cursor > 0) {
+            emu_type_cursor--;
+          } else if (emu_type_scroll > 0) {
+            emu_type_scroll--;
+          }
+          selected = emu_type_scroll + emu_type_cursor;
+          if (selected > 0 && selected < list_count - 1) {
+            emu_menu_type = static_cast<EmuType>(selected - 1);
+            emu_type = emu_menu_type;
+            emu_slot = 0;
+            if (nfc_ready) startCurrentEmulation();
+          }
+          drawScreen(true);
+        }
+      }
+      const bool hold_type_select = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+      if (hold_type_select || key_nav.confirm) {
+        if (hold_type_select) {
+          btn_hold_latched = true;
+          ignore_click_after_hold = true;
+        }
         const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
         const uint8_t selected = emu_type_scroll + emu_type_cursor;
         if (selected == 0) {
@@ -3446,29 +3572,55 @@ void loop() {
           drawScreen();
         }
       }
+      if (key_nav.back) {
+        emu_config_stage = EmuConfigStage::None;
+        emu_show_menu = false;
+        drawScreen();
+      }
     } else if (emu_config_stage == EmuConfigStage::SlotMenu) {
-      if (clicked) {
+      if (clicked || key_nav.next) {
         emu_slot = (emu_slot + 1) % 8;
         if (nfc_ready) startCurrentEmulation();
         drawScreen();
       }
-      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        ignore_click_after_hold = true;
+      if (key_nav.prev) {
+        emu_slot = (emu_slot + 7) % 8;
+        if (nfc_ready) startCurrentEmulation();
+        drawScreen();
+      }
+      const bool hold_slot_select = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+      if (hold_slot_select || key_nav.confirm) {
+        if (hold_slot_select) {
+          btn_hold_latched = true;
+          ignore_click_after_hold = true;
+        }
         emu_config_stage = EmuConfigStage::None;
         if (nfc_ready) startCurrentEmulation();
         emu_show_menu = false;
         drawScreen();
       }
+      if (key_nav.back) {
+        emu_config_stage = EmuConfigStage::None;
+        emu_show_menu = false;
+        drawScreen();
+      }
     } else {
-      if (clicked) {
+      if (clicked || key_nav.next) {
         emu_slot = (emu_slot + 1) % 8;
         if (nfc_ready) startCurrentEmulation();
         drawScreen();
       }
-      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        ignore_click_after_hold = true;
+      if (key_nav.prev) {
+        emu_slot = (emu_slot + 7) % 8;
+        if (nfc_ready) startCurrentEmulation();
+        drawScreen();
+      }
+      const bool hold_open_type_menu = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+      if (hold_open_type_menu || key_nav.confirm) {
+        if (hold_open_type_menu) {
+          btn_hold_latched = true;
+          ignore_click_after_hold = true;
+        }
         const uint8_t list_count = static_cast<uint8_t>(static_cast<uint8_t>(EmuType::Count) + 2);
         const uint8_t selected_idx = static_cast<uint8_t>(emu_type) + 1;
         uint8_t scroll = 0;
@@ -3483,16 +3635,28 @@ void loop() {
         emu_show_menu = false;
         drawScreen();
       }
+      if (key_nav.back) {
+        goHome();
+        delay(10);
+        return;
+      }
     }
   } else if (menu_page == MenuPage::Piano) {
     if (piano_stage == PianoStage::Menu) {
-      if (clicked) {
+      if (clicked || key_nav.next) {
         piano_menu_index = static_cast<uint8_t>((piano_menu_index + 1) % 3);
         drawScreen();
       }
-      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        ignore_click_after_hold = true;
+      if (key_nav.prev) {
+        piano_menu_index = static_cast<uint8_t>((piano_menu_index + 2) % 3);
+        drawScreen();
+      }
+      const bool hold_piano_enter = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+      if (hold_piano_enter || key_nav.confirm) {
+        if (hold_piano_enter) {
+          btn_hold_latched = true;
+          ignore_click_after_hold = true;
+        }
         piano_active_card_key = "";
         piano_active_note_idx = -1;
         piano_last_sustain_ms = 0;
@@ -3515,10 +3679,18 @@ void loop() {
         }
         drawScreen();
       }
+      if (key_nav.back) {
+        goHome();
+        delay(10);
+        return;
+      }
     } else {
-      if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-        btn_hold_latched = true;
-        ignore_click_after_hold = true;
+      const bool hold_piano_back = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+      if (hold_piano_back || key_nav.back) {
+        if (hold_piano_back) {
+          btn_hold_latched = true;
+          ignore_click_after_hold = true;
+        }
         piano_stage = PianoStage::Menu;
         piano_menu_index = 0;
         piano_active_card_key = "";
@@ -3531,7 +3703,7 @@ void loop() {
       }
     }
   } else {
-    if (clicked) {
+    if (clicked || key_nav.next || key_nav.prev) {
       if (menu_page == MenuPage::Reader) {
         reader_14b_only = !reader_14b_only;
         last_card.valid = false;
@@ -3550,9 +3722,12 @@ void loop() {
         runDiagnose();
       }
     }
-    if (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched) {
-      btn_hold_latched = true;
-      ignore_click_after_hold = true;
+    const bool hold_go_home = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+    if (hold_go_home || key_nav.back) {
+      if (hold_go_home) {
+        btn_hold_latched = true;
+        ignore_click_after_hold = true;
+      }
       goHome();
     }
   }

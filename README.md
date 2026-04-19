@@ -1,6 +1,6 @@
-# GroveNFC Reference Demo (AtomS3 + M5Stick Series)
+# GroveNFC Reference Demo (AtomS3 + M5Stick + CardPuter Series)
 
-Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware)**.
+Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware) / CardPuter / CardPuter ADV (single firmware logic)**.
 
 This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
 
@@ -41,6 +41,7 @@ Current board I2C pins (auto-selected in `src/main.cpp` by build target):
 - AtomS3: SDA `GPIO2`, SCL `GPIO1`
 - M5StickS3: SDA `GPIO9`, SCL `GPIO10`
 - M5StickC Plus (1.1 / Plus2 unified): SDA `GPIO32`, SCL `GPIO33`
+- CardPuter / CardPuter ADV: SDA `GPIO2`, SCL `GPIO1`
 - I2C address: `0x48`
 
 Pin mapping note:
@@ -59,10 +60,18 @@ For M5StickS3 target, firmware enables `EXT_5V` power output (`M5.Power.setExtOu
 
 Single main button: `BtnA`
 
+CardPuter / CardPuter ADV keyboard shortcuts (recommended):
+
+- `Direction Up/Left`: previous item (also supports `W/A/H/I/K` aliases)
+- `Direction Down/Right`: next item (also supports `S/D/J/L` aliases)
+- `Enter`: confirm / enter feature
+- `ESC` (or `Del` fallback): back / cancel
+
 ### Home page
 
 - **Single click**: rotate feature card (`Diagnose -> Reader -> Read NDEF -> Emulator`)
 - **Long press (~1s)**: enter current feature
+- **Keyboard**: direction keys switch feature, `Enter` enters feature
 
 ### Reader page
 
@@ -70,6 +79,7 @@ Single main button: `BtnA`
 - Plays protocol-dependent tone after detecting a new card
 - **Single click**: force immediate scan
 - **Long press (~1s)**: go back to Home
+- **Keyboard**: direction keys toggle reader mode, `ESC` back to Home
 
 ### Read NDEF page
 
@@ -77,12 +87,14 @@ Single main button: `BtnA`
 - Plays success tone after successful read (Wi-Fi payload uses a 3-note tone)
 - **Single click**: manual NDEF scan now
 - **Long press (~1s)**: go back to Home
+- **Keyboard**: direction keys trigger scan, `ESC` back to Home
 
 ### Emulator page
 
 - Menu actions: `Back`, `Start`, `Type`, `Slot`
 - **Single click**: move to next action/item
 - **Long press (~1s)**: confirm current action/item
+- **Keyboard**: direction keys move selection / slot, `Enter` confirm, `ESC` back
 - Slot range: `0` to `7`
 
 ### Wi-Fi popup (from NDEF)
@@ -95,6 +107,7 @@ When NDEF text contains a Wi-Fi payload like:
 
 - **Single click**: cancel
 - **Long press (~700ms)**: connect
+- **Keyboard**: `ESC` cancel, `Enter` connect
 
 Connection result is shown on the NDEF page (IP is shown on success).
 
@@ -118,6 +131,8 @@ Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
   - `m5stack-sticks3`
   - `m5stack-stickcplus`
     - `m5stack-stickcplus2` (alias of `m5stack-stickcplus`)
+  - `m5stack-cardputer` (CardPuter / CardPuter ADV shared logic)
+  - `m5stack-cardputer-adv` (alias of `m5stack-cardputer`)
 4. Open Serial Monitor at `115200`
 
 Example:
@@ -130,6 +145,10 @@ pio run -e m5stack-sticks3 -t upload
 pio run -e m5stack-stickcplus -t upload
 # or
 pio run -e m5stack-stickcplus2 -t upload
+# or
+pio run -e m5stack-cardputer -t upload
+# or
+pio run -e m5stack-cardputer-adv -t upload
 pio device monitor -b 115200
 ```
 
