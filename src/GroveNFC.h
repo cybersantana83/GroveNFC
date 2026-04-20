@@ -6,6 +6,7 @@
 namespace grove_nfc {
 
 constexpr uint8_t I2C_SLAVE_ADDR = 0x48;
+constexpr uint8_t I2C_NFC_UNIT_ADDR = 0x50;
 
 constexpr uint16_t I2cSysReg_GetHardwareVersion_Addr = 0x0000;
 constexpr uint16_t I2cSysReg_GetFirmwareVersion_Addr = 0x0002;
@@ -85,6 +86,7 @@ struct CardInfo {
 class GroveNFC {
  public:
   explicit GroveNFC(TwoWire& wire) : wire_(wire) {}
+  ~GroveNFC();
 
   bool begin();
   bool ping();
@@ -101,11 +103,21 @@ class GroveNFC {
   bool startEmulationChinaII();
   bool startEmulationFelica();
   bool startEmulationISO15();
+  bool startNfcUnitEmulation(bool use_ntag213);
+  bool startNfcUnitEmulationNtag(uint16_t ntag_type);  // 213, 215, 216
+  bool startNfcUnitEmulationFelica();
+  void stopNfcUnitEmulation();
+  bool isNfcUnitEmulating() const;
+  void tickNfcUnitEmulation();
   bool readAny(CardInfo& card);
   bool readOnlyISO14B(CardInfo& card);
   bool readNdef(String& ndef_text, String& detail);
+  const char* deviceName() const;
+  uint8_t activeAddress() const { return i2c_addr_; }
 
  private:
+  bool probeAddress(uint8_t addr);
+  bool detectAddress();
   bool selectReaderCommon();
   bool selectISO14A(uint8_t* uid_buf, size_t& uid_len);
   bool type2ReadBlock(uint8_t start_page, uint8_t* out16);
@@ -129,7 +141,14 @@ class GroveNFC {
   void writeNtag216Image();
   void writeISO15Image();
 
+  struct NfcUnitBridge;
+  bool beginNfcUnitBackend();
+  bool readAnyNfcUnit(CardInfo& card);
+
   TwoWire& wire_;
+  uint8_t i2c_addr_ = I2C_SLAVE_ADDR;
+  bool is_nfc_unit_ = false;
+  NfcUnitBridge* nfc_unit_bridge_ = nullptr;
 
   uint8_t slot_index_ = 0;
 };

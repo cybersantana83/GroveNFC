@@ -1,0 +1,8 @@
+config GROVENFC_DRIVER
+    bool "Grove NFC I2C driver"
+    default y
+    depends on I2C
+    help
+      Low-level Zephyr driver for the Seeed Grove NFC module (I2C address 0x48).
+      Provides register read/write and RF transceive primitives used by the
+      application-level NFC reader and emulator modules.

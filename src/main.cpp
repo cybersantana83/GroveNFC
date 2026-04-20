@@ -67,6 +67,8 @@ constexpr uint32_t kReaderRecoverMs = 6000;
 constexpr uint32_t kRecoverCooldownMs = 1500;
 constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
+constexpr uint32_t kReaderAnimStepUs = 8000;
+constexpr uint32_t kReaderSweepUs = 820000;
 constexpr bool kAutoBootDebug = true;
 constexpr uint32_t kBootDebugShowMs = 2500;
 #if defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_STICKS3) || defined(APP_TARGET_CARDPUTER)
@@ -128,6 +130,9 @@ constexpr uint16_t kPianoSustainRetriggerMs = 110;
 constexpr const char* kPianoPrefNs = "piano";
 
 GroveNFC nfc(Wire);
+// Off-screen canvas for flicker-free rendering (all drawing targets this sprite, then a
+// single pushSprite() DMA-blits the complete frame to the physical display).
+LGFX_Sprite g_canvas;
 MenuPage menu_page = MenuPage::Diagnose;
 EmuType emu_type = EmuType::N213;
 EmuType emu_menu_type = EmuType::N213;
@@ -167,6 +172,7 @@ uint32_t last_reader_success_ms = 0;
 uint32_t last_recover_ms = 0;
 uint32_t last_diag_scroll_ms = 0;
 uint32_t last_ui_scroll_ms = 0;
+uint32_t last_reader_anim_us = 0;
 bool btn_hold_latched = false;
 bool ignore_click_after_hold = false;
 String boot_notice_line;
@@ -176,6 +182,7 @@ bool reader_need_first_tone = false;
 bool reader_14b_only = false;
 uint32_t reader_last_hold_log_ms = 0;
 uint8_t reader_fail_streak = 0;
+String nfc_module_name = "GroveNFC";
 Preferences prefs;
 PianoStage piano_stage = PianoStage::Menu;
 uint8_t piano_menu_index = 0;
@@ -386,6 +393,14 @@ void playNdefTone(bool is_wifi) {
 }
 
 const MenuPage kHomeOrder[5] = {MenuPage::Reader, MenuPage::ReadNDEF, MenuPage::Emulator, MenuPage::Piano, MenuPage::Diagnose};
+const MenuPage kHomeOrderNfcUnit[2] = {MenuPage::Reader, MenuPage::Emulator};
+// NFC Unit uses distinct accent colors to differentiate from Grove NFC Reader/Emulator
+constexpr uint16_t kNfcUnitReaderColor   = 0x07BF;  // teal-cyan (vs Grove green)
+constexpr uint16_t kNfcUnitEmulatorColor = 0x781F;  // violet-purple (vs Grove orange)
+
+inline bool isNfcUnitMode() { return nfc_module_name == "NFC Unit"; }
+inline int  homePageCount() { return isNfcUnitMode() ? 2 : static_cast<int>(MenuPage::Count); }
+inline MenuPage homePageAt(int i) { return isNfcUnitMode() ? kHomeOrderNfcUnit[i] : kHomeOrder[i]; }
 
 const char* pageName(MenuPage page) {
   switch (page) {
@@ -783,6 +798,31 @@ String readerIdLabel(const grove_nfc::CardInfo& card) {
   return "--";
 }
 
+void drawReaderUnitName(lgfx::v1::LGFXBase& d,
+                        int x,
+                        int y,
+                        int width,
+                        int height,
+                        uint16_t accent) {
+  String unit_text = upperText(nfc_module_name);
+  d.setFont(&fonts::Font2);
+  d.setTextSize(1);
+  d.setTextWrap(false);
+
+  const int unit_w = d.textWidth(unit_text);
+  const int unit_x = x + (width - unit_w) / 2;
+  const int top_y = y + 3;
+  const int bottom_y = y + height - d.fontHeight() - 3;
+
+  d.setTextColor(scaleColor565(accent, 190), TFT_BLACK);
+  d.setCursor(unit_x, top_y);
+  d.print(unit_text);
+
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(unit_x, bottom_y);
+  d.print(unit_text);
+}
+
 void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
                          int x,
                          int y,
@@ -793,6 +833,8 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
                          bool only_14b,
                          bool anim_only = false) {
   if (width < 40 || height < 24) return;
+
+  d.startWrite();
 
   if (!anim_only) {
     d.fillRect(x, y, width, height, TFT_BLACK);
@@ -824,49 +866,104 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
     static int proto_idx = 0;
 
     static float progress = 0.0f;
-    static int phase = 0;           // 0=opening, 1=closing
-    static uint32_t last_step_ms = 0;
-    static int prev_scan_pos = -1;
+    static int phase = 0;           // 0=L→R, 1=R→L
     static bool initialized = false;
+    static uint32_t last_step_us = 0;
 
-    const uint32_t now_ms = millis();
-    const uint32_t cycle_ms = 800;
+    // Pre-rendered text sprite: rebuilt only when proto or dimensions change.
+    // pushSprite with clip is a single DMA burst vs d.print() which fires per-char SPI transactions.
+    static LGFX_Sprite txt_spr;
+    static int txt_spr_w = 0;
+    static int txt_spr_h = 0;
+    static int txt_spr_proto = -1;
+    static uint16_t txt_spr_color = 0;
+
+    // Off-screen inner-area buffer: compose full frame here, then push once.
+    // This eliminates the black-flash caused by fillRect + pushSprite being
+    // two separate SPI transactions — display scans between them and shows black.
+    static LGFX_Sprite inner_spr;
+    static int inner_spr_w = 0;
+    static int inner_spr_h = 0;
 
     if (!initialized) {
       progress = 0.0f;
       phase = 0;
-      last_step_ms = now_ms;
-      prev_scan_pos = -1;
+      last_step_us = micros();
       initialized = true;
-    } else {
-      // Always advance animation regardless of anim_only
-      const uint32_t elapsed = now_ms - last_step_ms;
-      last_step_ms = now_ms;
-      float dt = static_cast<float>(elapsed) / static_cast<float>(cycle_ms);
-      progress += dt;
-      if (progress >= 1.0f) {
-        progress = 0.0f;
-        if (phase == 1) {
-          proto_idx = (proto_idx + 1) % kProtoCount;
-          phase = 0;
-        } else {
-          phase = 1;
+    } else if (anim_only) {
+      // Fixed-step animator driven by micros() inside the draw function.
+      // This avoids external gating edge-cases that can freeze progress at 0.
+      const uint32_t now_us = micros();
+      uint32_t elapsed = now_us - last_step_us;
+      if (elapsed >= kReaderAnimStepUs) {
+        uint32_t steps = elapsed / kReaderAnimStepUs;
+        if (steps > 8) steps = 8;  // clamp catch-up to keep motion smooth
+        last_step_us += steps * kReaderAnimStepUs;
+        const float dt = static_cast<float>(kReaderAnimStepUs) / static_cast<float>(kReaderSweepUs);
+        progress += dt * static_cast<float>(steps);
+        while (progress >= 1.0f) {
+          progress -= 1.0f;
+          if (phase == 1) {
+            proto_idx = (proto_idx + 1) % kProtoCount;
+            phase = 0;
+          } else {
+            phase = 1;
+          }
         }
       }
+    } else {
+      // On full refresh, sync step clock so next anim tick doesn't burst.
+      last_step_us = micros();
     }
 
-    // Ease-in-out: smoothstep 3t²-2t³
-    float t = progress;
-    float eased = t * t * (3.0f - 2.0f * t);
+    // Stronger edge deceleration: mostly sinusoidal easing with enough linear term
+    // to keep endpoint velocity non-zero after integer rounding.
+    const float t = progress;
+    const float ease_in_out = 0.5f - 0.5f * cosf(t * 3.1415926f);  // 0..1
+    const float eased = 0.56f * t + 0.44f * ease_in_out;
     int scan_pos;
     if (phase == 0) {
-      scan_pos = static_cast<int>(eased * travel);
+      scan_pos = static_cast<int>(eased * travel + 0.5f);
     } else {
-      scan_pos = travel - static_cast<int>(eased * travel);
+      scan_pos = travel - static_cast<int>(eased * travel + 0.5f);
     }
     if (scan_pos < 0) scan_pos = 0;
     if (scan_pos > travel) scan_pos = travel;
     const int scan_x = inner_left + scan_pos;
+
+    const char* label = kProtoLabels[proto_idx];
+    const uint16_t text_color = scaleColor565(accent, 180);
+
+    // Rebuild text sprite if proto / dimensions / color changed
+    if (txt_spr_proto != proto_idx || txt_spr_w != inner_w || txt_spr_h != inner_h || txt_spr_color != text_color) {
+      if (txt_spr_w != inner_w || txt_spr_h != inner_h) {
+        txt_spr.deleteSprite();
+        txt_spr.setColorDepth(16);
+        txt_spr.createSprite(inner_w, inner_h);
+        txt_spr_w = inner_w;
+        txt_spr_h = inner_h;
+      }
+      txt_spr.fillSprite(TFT_BLACK);
+      txt_spr.setFont(&fonts::Font0);
+      txt_spr.setTextSize(2);
+      txt_spr.setTextWrap(false);
+      txt_spr.setTextColor(text_color);
+      int16_t tw2 = txt_spr.textWidth(label);
+      int16_t th2 = txt_spr.fontHeight();
+      txt_spr.setCursor((inner_w - tw2) / 2, (inner_h - th2) / 2);
+      txt_spr.print(label);
+      txt_spr_proto = proto_idx;
+      txt_spr_color = text_color;
+    }
+
+    // Rebuild inner sprite if dimensions changed
+    if (inner_spr_w != inner_w || inner_spr_h != inner_h) {
+      inner_spr.deleteSprite();
+      inner_spr.setColorDepth(16);
+      inner_spr.createSprite(inner_w, inner_h);
+      inner_spr_w = inner_w;
+      inner_spr_h = inner_h;
+    }
 
     // --- Draw border (only on full refresh) ---
     if (!anim_only) {
@@ -893,56 +990,29 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
       d.fillRect(card_x + card_w - 1, card_y + card_h - rc, 1, rc, TFT_BLACK);
       d.fillRect(card_x + card_w - 3, card_y + card_h - 2, 2, 1, TFT_BLACK);
       d.fillRect(card_x + card_w - 2, card_y + card_h - 3, 1, 2, TFT_BLACK);
-      // Full redraw of inner area + current text state
-      d.fillRect(inner_left, inner_top, inner_w, inner_h, TFT_BLACK);
-      prev_scan_pos = -1;
     }
 
-    // --- Delta update: only repaint changed region to eliminate flicker ---
-    d.setFont(&fonts::Font0);
-    d.setTextSize(2);
-    d.setTextWrap(false);
-    const char* label = kProtoLabels[proto_idx];
-    int16_t tw = d.textWidth(label);
-    int16_t th = d.fontHeight();
-    int text_x = inner_left + (inner_w - tw) / 2;
-    int text_y = inner_top + (inner_h - th) / 2;
-    uint16_t text_color = scaleColor565(accent, 180);
-
-    if (prev_scan_pos >= 0 && scan_pos != prev_scan_pos) {
-      int old_x = inner_left + prev_scan_pos;
-      int dirty_left = min(old_x, scan_x);
-      int dirty_right = max(old_x + 2, scan_x + 2);
-      int dirty_w = dirty_right - dirty_left;
-
-      if (phase == 0) {
-        d.setClipRect(dirty_left, inner_top, dirty_w, inner_h);
-        d.fillRect(dirty_left, inner_top, dirty_w, inner_h, TFT_BLACK);
-        d.setTextColor(text_color);
-        d.setCursor(text_x, text_y);
-        d.print(label);
-        d.clearClipRect();
-      } else {
-        d.fillRect(dirty_left, inner_top, dirty_w, inner_h, TFT_BLACK);
-      }
-    } else if (prev_scan_pos < 0) {
-      // Full refresh: draw entire current text state
-      if (phase == 0 && scan_pos > 0) {
-        d.setClipRect(inner_left, inner_top, scan_pos, inner_h);
-        d.setTextColor(text_color);
-        d.setCursor(text_x, text_y);
-        d.print(label);
-        d.clearClipRect();
-      }
+    // --- Compose full frame into inner_spr, then push once (single DMA transaction).
+    // This eliminates the black-flash that occurs when fillRect and pushSprite are
+    // two separate SPI writes with the display scanning between them.
+    inner_spr.fillSprite(TFT_BLACK);
+    // Curtain reveal: text visible to the LEFT of the scan line in both phases.
+    //   phase 0 (L→R): text grows from left as line sweeps right
+    //   phase 1 (R→L): line sweeps left, progressively covering text from right
+    if (scan_pos > 0) {
+      inner_spr.setClipRect(0, 0, scan_pos, inner_h);
+      txt_spr.pushSprite(&inner_spr, 0, 0);
+      inner_spr.clearClipRect();
     }
-
-    // Draw curtain line (shorter, with gap from border)
-    d.fillRect(scan_x, line_top, 2, line_h, TFT_WHITE);
-    prev_scan_pos = scan_pos;
+    // Scan line (coordinates relative to inner_spr origin)
+    inner_spr.fillRect(scan_pos, line_gap, 2, line_h, TFT_WHITE);
+    // Push the completed frame to display in one transaction — no intermediate state shown
+    inner_spr.pushSprite(static_cast<lgfx::v1::LovyanGFX*>(&d), inner_left, inner_top);
+    d.endWrite();
     return;
   }
 
-  if (anim_only) return;
+  if (anim_only) { d.endWrite(); return; }
 
 
   String type_text = upperText(readerTypeLabel(card, only_14b));
@@ -1013,6 +1083,8 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
   d.setCursor(id_x, id_y);
   d.print(id_text);
 #endif
+
+  d.endWrite();
 }
 
 void drawPianoKeyboard(lgfx::v1::LGFXBase& d,
@@ -1172,7 +1244,7 @@ void drawPianoPlayPartial() {
 }
 
 void drawScreen(bool popup_only = false) {
-  auto& d = M5.Display;
+  auto& d = g_canvas;  // draw to off-screen sprite; push to display at every exit
   if (!popup_only) {
     d.fillScreen(TFT_BLACK);
   }
@@ -1187,6 +1259,11 @@ void drawScreen(bool popup_only = false) {
   if (menu_page == MenuPage::Emulator) accent = TFT_ORANGE;
   if (menu_page == MenuPage::Diagnose) accent = TFT_YELLOW;
   if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
+  // NFC Unit mode: override Reader/Emulator with distinct colors
+  if (isNfcUnitMode()) {
+    if (menu_page == MenuPage::Reader)   accent = kNfcUnitReaderColor;
+    if (menu_page == MenuPage::Emulator) accent = kNfcUnitEmulatorColor;
+  }
 
 #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
   if (w > h) {
@@ -1276,6 +1353,7 @@ void drawScreen(bool popup_only = false) {
         d.setCursor(row_x + 6, text_y);
         d.print(typeMenuLabel(static_cast<uint8_t>(idx)));
       }
+      g_canvas.pushSprite(&M5.Display, 0, 0);
       return;
     }
 
@@ -1284,10 +1362,10 @@ void drawScreen(bool popup_only = false) {
       d.setTextColor(breathingColor(accent), TFT_BLACK);
       d.setTextSize(2);
       d.setFont(&fonts::Font0);
-      const char* brand = "GroveNFC";
-      const int brand_w = d.textWidth(brand);
+      String brand_s3 = nfc_module_name;
+      const int brand_w = d.textWidth(brand_s3);
       d.setCursor((w - brand_w) / 2, 2);
-      d.print(brand);
+      d.print(brand_s3);
 
       const int icon_cy = content_top + content_h / 2;
 
@@ -1361,6 +1439,7 @@ void drawScreen(bool popup_only = false) {
         d.setCursor(4, h - 24);
         d.print(boot_notice_line);
       }
+      g_canvas.pushSprite(&M5.Display, 0, 0);
       return;
     }
 
@@ -1518,15 +1597,96 @@ void drawScreen(bool popup_only = false) {
       d.setTextColor(TFT_WHITE, TFT_BLACK);
       drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
     } else if (menu_page == MenuPage::Emulator) {
-      d.setTextColor(accent, TFT_BLACK);
-      d.setCursor(4, content_top + 2);
-      d.print(emuName(emu_type));
-      d.setTextColor(TFT_WHITE, TFT_BLACK);
-      d.setCursor(4, content_top + 20);
-      d.printf("Slot %d/8", emu_slot + 1);
-      d.setCursor(4, content_top + 38);
-      if (emu_type == EmuType::Felica && !emu_started) d.print("Not supported");
-      else d.print(emulatorDisplayId(emu_type, emu_slot));
+      if (isNfcUnitMode()) {
+        // NFC Unit: card-style layout — type centred + arrows + ID below. No Slot.
+        d.fillRect(4, content_top + 2, w - 8, content_h - 4, TFT_BLACK);
+        const int ex = 4, ey = content_top + 2, ew = w - 8, eh = content_h - 4;
+        const int center_y = ey + eh / 2;
+        const String type_text = String(emuName(emu_type));
+        d.setFont(&fonts::Font0);
+        d.setTextSize(2);
+        const int type_w = d.textWidth(type_text);
+        const int type_x = ex + (ew - type_w) / 2;
+        const int type_y = center_y - 9;
+        d.setTextColor(accent, TFT_BLACK);
+        d.setCursor(type_x, type_y);
+        d.print(type_text);
+        // Chunky arrows flanking the type name
+        const int deco_gap = 6;
+        const int deco_y = type_y + 1;
+        const int left_deco_x  = type_x - deco_gap - 12;
+        const int right_deco_x = type_x + type_w + deco_gap;
+        if (left_deco_x >= ex + 1 && right_deco_x + 12 <= ex + ew - 1) {
+          d.fillRect(left_deco_x + 1, deco_y + 2, 3, 10, accent);
+          d.fillRect(left_deco_x + 4, deco_y + 4, 3,  6, accent);
+          d.fillRect(left_deco_x + 7, deco_y + 6, 3,  2, accent);
+          d.fillRect(right_deco_x + 8, deco_y + 2, 3, 10, accent);
+          d.fillRect(right_deco_x + 5, deco_y + 4, 3,  6, accent);
+          d.fillRect(right_deco_x + 2, deco_y + 6, 3,  2, accent);
+        }
+        // ID line centred below — dynamic based on type support and emulation state
+        const bool nfc_unit_type_ok = (emu_type == EmuType::N213 || emu_type == EmuType::N215 || emu_type == EmuType::N216 || emu_type == EmuType::Felica);
+        String id_text;
+        uint16_t id_color;
+        if (!nfc_unit_type_ok) {
+          id_text = "Not supported";
+          id_color = 0x6B6D;  // dark grey
+        } else if (emu_started) {
+          id_text = (emu_type == EmuType::Felica) ? "02FE123456789ABC" : "04123456789ABC";
+          id_color = TFT_GREEN;
+        } else {
+          id_text = "Starting...";
+          id_color = TFT_WHITE;
+        }
+        const int id_w = d.textWidth(id_text);
+        d.setTextColor(id_color, TFT_BLACK);
+        d.setCursor(ex + (ew - id_w) / 2, center_y + 18);
+        d.print(id_text);
+      } else {
+        // Grove mode: card-style with Slot label + centred type + arrows + coloured ID.
+        d.fillRect(4, content_top + 2, w - 8, content_h - 4, TFT_BLACK);
+        const int gex = 4, gey = content_top + 2, gew = w - 8, geh = content_h - 4;
+        const int gcenter_y = gey + geh / 2;
+        // Slot label (small, top-left)
+        d.setFont(&fonts::Font0);
+        d.setTextSize(1);
+        char slot_buf[12];
+        snprintf(slot_buf, sizeof(slot_buf), "Slot %d/8", emu_slot + 1);
+        d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        d.setCursor(gex + 4, gey + 4);
+        d.print(slot_buf);
+        // Type name centred with chunky arrows
+        d.setTextSize(2);
+        const String grove_type_text = String(emuName(emu_type));
+        const int grove_type_w = d.textWidth(grove_type_text);
+        const int grove_type_x = gex + (gew - grove_type_w) / 2;
+        const int grove_type_y = gcenter_y - 9;
+        d.setTextColor(accent, TFT_BLACK);
+        d.setCursor(grove_type_x, grove_type_y);
+        d.print(grove_type_text);
+        {
+          const int dg = 6;
+          const int dy = grove_type_y + 1;
+          const int lx = grove_type_x - dg - 12;
+          const int rx = grove_type_x + grove_type_w + dg;
+          if (lx >= gex + 1 && rx + 12 <= gex + gew - 1) {
+            d.fillRect(lx + 1, dy + 2, 3, 10, accent);
+            d.fillRect(lx + 4, dy + 4, 3,  6, accent);
+            d.fillRect(lx + 7, dy + 6, 3,  2, accent);
+            d.fillRect(rx + 8, dy + 2, 3, 10, accent);
+            d.fillRect(rx + 5, dy + 4, 3,  6, accent);
+            d.fillRect(rx + 2, dy + 6, 3,  2, accent);
+          }
+        }
+        // ID line centred below
+        const bool grove_unsupported = (emu_type == EmuType::Felica && !emu_started);
+        const String grove_id = grove_unsupported ? String("Not supported") : emulatorDisplayId(emu_type, emu_slot);
+        const uint16_t grove_id_col = grove_unsupported ? (uint16_t)0x6B6D : (emu_started ? (uint16_t)TFT_GREEN : (uint16_t)TFT_WHITE);
+        const int gid_w = d.textWidth(grove_id);
+        d.setTextColor(grove_id_col, TFT_BLACK);
+        d.setCursor(gex + (gew - gid_w) / 2, gcenter_y + 18);
+        d.print(grove_id);
+      }
     } else if (menu_page == MenuPage::Piano) {
       d.setTextColor(accent, TFT_BLACK);
       d.setCursor(4, content_top + 2);
@@ -1590,6 +1750,7 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(box_x + 6, box_y + box_h - 14);
       d.print("CLICK NO   HOLD YES");
     }
+    g_canvas.pushSprite(&M5.Display, 0, 0);
     return;
   }
 #endif
@@ -1689,7 +1850,7 @@ void drawScreen(bool popup_only = false) {
   if (in_home) {
     d.setTextColor(breathingColor(accent), TFT_BLACK);
     d.setTextSize(2);
-    const char* brand = "GroveNFC";
+    String brand = nfc_module_name;
     int brand_w = d.textWidth(brand);
     d.setCursor((w - brand_w) / 2, 1);
     d.print(brand);
@@ -1769,6 +1930,7 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(4, 118);
       d.print(boot_notice_line);
     }
+    g_canvas.pushSprite(&M5.Display, 0, 0);
     return;
   }
 
@@ -1792,6 +1954,7 @@ void drawScreen(bool popup_only = false) {
       if (body_line.isEmpty()) body_line = "Mode: 14B ONLY";
       else body_line += "  14B";
     }
+    body_line += "  " + nfc_module_name;
   } else if (menu_page == MenuPage::ReadNDEF) {
     sub_title_line = "NDEF";
     title_line = "Scanning";
@@ -1814,10 +1977,16 @@ void drawScreen(bool popup_only = false) {
   } else if (menu_page == MenuPage::Emulator) {
     sub_title_line = "Emulator";
     title_line = String(emuName(emu_type));
-    String emu_id = (emu_type == EmuType::Felica && !emu_started) ? String("Not supported") : emulatorDisplayId(emu_type, emu_slot);
-    emu_slot_line = String("Slot ") + String(emu_slot + 1) + "/8";
-    emu_id_line = emu_id;
-    body_line = emu_slot_line + " " + emu_id_line;
+    if (isNfcUnitMode()) {
+      emu_slot_line = "";
+      emu_id_line = "Not supported";
+      body_line = emu_id_line;
+    } else {
+      String emu_id = (emu_type == EmuType::Felica && !emu_started) ? String("Not supported") : emulatorDisplayId(emu_type, emu_slot);
+      emu_slot_line = String("Slot ") + String(emu_slot + 1) + "/8";
+      emu_id_line = emu_id;
+      body_line = emu_slot_line + " " + emu_id_line;
+    }
   } else if (menu_page == MenuPage::Piano) {
     sub_title_line = "Piano";
     if (piano_stage == PianoStage::Menu) {
@@ -1878,11 +2047,101 @@ void drawScreen(bool popup_only = false) {
   } else if (menu_page == MenuPage::Emulator) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(4, body_y);
-    d.print(emu_slot_line);
-    d.setCursor(4, body_y + 18);
-    d.print(emu_id_line);
+    if (isNfcUnitMode()) {
+      // NFC Unit: replicate Reader card style (type centred + arrows + ID below).
+      // Clear the whole card area (overwriting the header title_line printed above).
+      const int ex = 4, ey = 26, ew = w - 8, eh = h - 30;
+      d.fillRect(ex, ey, ew, eh, TFT_BLACK);
+      const int center_y = ey + eh / 2;
+      const int type_w = d.textWidth(title_line);
+      const int type_x = ex + (ew - type_w) / 2;
+      const int type_y = center_y - 18;
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(type_x, type_y);
+      d.print(title_line);
+#ifndef APP_TARGET_ATOMS3
+      // Chunky arrows flanking the type name
+      const int deco_gap = 6;
+      const int deco_y = type_y + 1;
+      const int left_deco_x  = type_x - deco_gap - 12;
+      const int right_deco_x = type_x + type_w + deco_gap;
+      if (left_deco_x >= ex + 1 && right_deco_x + 12 <= ex + ew - 1) {
+        d.fillRect(left_deco_x + 1, deco_y + 2, 3, 10, accent);
+        d.fillRect(left_deco_x + 4, deco_y + 4, 3,  6, accent);
+        d.fillRect(left_deco_x + 7, deco_y + 6, 3,  2, accent);
+        d.fillRect(right_deco_x + 8, deco_y + 2, 3, 10, accent);
+        d.fillRect(right_deco_x + 5, deco_y + 4, 3,  6, accent);
+        d.fillRect(right_deco_x + 2, deco_y + 6, 3,  2, accent);
+      }
+#endif
+      // ID line centred below – runtime colour based on emulation state
+      {
+        const bool nu_type_ok = (emu_type == EmuType::N213);
+        String nu_id;
+        uint16_t nu_col;
+        if (!nu_type_ok) {
+          nu_id  = "Not supported";
+          nu_col = 0x6B6D;
+        } else if (emu_started) {
+          nu_id  = "04123456789ABC";
+          nu_col = TFT_GREEN;
+        } else {
+          nu_id  = "Starting...";
+          nu_col = TFT_WHITE;
+        }
+        const int iw = d.textWidth(nu_id);
+        d.setTextColor(nu_col, TFT_BLACK);
+        d.setCursor(ex + (ew - iw) / 2, center_y + 4);
+        d.print(nu_id);
+      }
+    } else {
+      // Grove mode: card-style with Slot label + centred type + arrows + coloured ID.
+      const int gex = 4, gey = 26, gew = w - 8, geh = h - 30;
+      const int gcenter_y = gey + geh / 2;
+      d.fillRect(gex, gey, gew, geh, TFT_BLACK);
+      // Slot label (small, top-left of card area)
+      d.setFont(&fonts::Font0);
+      d.setTextSize(1);
+      char slot_buf[12];
+      snprintf(slot_buf, sizeof(slot_buf), "Slot %d/8", emu_slot + 1);
+      d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      d.setCursor(gex + 4, gey + 2);
+      d.print(slot_buf);
+      // Type name centred with arrows
+      d.setTextSize(2);
+      const String ls_type = String(emuName(emu_type));
+      const int ls_tw = d.textWidth(ls_type);
+      const int ls_tx = gex + (gew - ls_tw) / 2;
+      const int ls_ty = gcenter_y - 18;
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(ls_tx, ls_ty);
+      d.print(ls_type);
+#ifndef APP_TARGET_ATOMS3
+      {
+        const int dg = 6, dy = ls_ty + 1;
+        const int lx = ls_tx - dg - 12;
+        const int rx = ls_tx + ls_tw + dg;
+        if (lx >= gex + 1 && rx + 12 <= gex + gew - 1) {
+          d.fillRect(lx + 1, dy + 2, 3, 10, accent);
+          d.fillRect(lx + 4, dy + 4, 3,  6, accent);
+          d.fillRect(lx + 7, dy + 6, 3,  2, accent);
+          d.fillRect(rx + 8, dy + 2, 3, 10, accent);
+          d.fillRect(rx + 5, dy + 4, 3,  6, accent);
+          d.fillRect(rx + 2, dy + 6, 3,  2, accent);
+        }
+      }
+#endif
+      // ID line centred below
+      {
+        const bool ls_unsupported = (emu_type == EmuType::Felica && !emu_started);
+        const String ls_id = ls_unsupported ? String("Not supported") : emulatorDisplayId(emu_type, emu_slot);
+        const uint16_t ls_col = ls_unsupported ? (uint16_t)0x6B6D : (emu_started ? (uint16_t)TFT_GREEN : (uint16_t)TFT_WHITE);
+        const int ls_iw = d.textWidth(ls_id);
+        d.setTextColor(ls_col, TFT_BLACK);
+        d.setCursor(gex + (gew - ls_iw) / 2, gcenter_y + 4);
+        d.print(ls_id);
+      }
+    }
   } else if (menu_page == MenuPage::Diagnose) {
     d.setFont(&fonts::Font2);
     d.setTextSize(1);
@@ -2020,6 +2279,7 @@ void drawScreen(bool popup_only = false) {
         thumb_y += ((track_h - 2 - thumb_h) * scroll_start) / safe_scroll;
       }
       d.fillRect(track_x + 1, thumb_y, scroll_w - 2, thumb_h, accent);
+      g_canvas.pushSprite(&M5.Display, 0, 0);
       return;
     }
   }
@@ -2180,6 +2440,7 @@ void drawScreen(bool popup_only = false) {
     d.print("CLICK NO  HOLD YES");
     d.setTextColor(TFT_WHITE, TFT_BLACK);
   }
+  g_canvas.pushSprite(&M5.Display, 0, 0);
 }
 
 bool recoverNfc(const char* reason, bool rebegin) {
@@ -2243,7 +2504,7 @@ void goHome() {
   wifi_popup = false;
   emu_config_stage = EmuConfigStage::None;
   emu_show_menu = false;
-  menu_page = kHomeOrder[home_index];
+  menu_page = homePageAt(home_index);
   drawScreen();
 }
 
@@ -2482,8 +2743,8 @@ void runBootDebugFlow() {
     delay(wait_ms);
   };
 
-  pushBootLog("[BOOT] GroveNFC init", TFT_GREEN, 120);
-  pushBootLog("[BOOT] I2C @400k", TFT_GREEN, 90);
+  pushBootLog(String("[BOOT] ") + nfc_module_name + " init", TFT_GREEN, 120);
+  pushBootLog(String("[BOOT] I2C @400k addr=0x") + String(nfc.activeAddress(), HEX), TFT_GREEN, 90);
 
   Serial.println("[BOOT] Auto debug start");
   if (!nfc_ready) {
@@ -2876,17 +3137,28 @@ void nfcWorkerTask(void* /*param*/) {
           case NfcCmd::StartEmulation: {
             if (nfc_ready) {
               EmuType et = static_cast<EmuType>(nfc_w_emu_type);
-              nfc.setSlot(nfc_w_emu_slot);
               bool ok = false;
-              switch (et) {
-                case EmuType::MF1K:  ok = nfc.startEmulationMifare1K(); break;
-                case EmuType::N213:  ok = nfc.startEmulationNtag213(); break;
-                case EmuType::N215:  ok = nfc.startEmulationNtag215(); break;
-                case EmuType::N216:  ok = nfc.startEmulationNtag216(); break;
-                case EmuType::ISO14B: ok = nfc.startEmulationChinaII(); break;
-                case EmuType::Felica: ok = nfc.startEmulationFelica(); break;
-                case EmuType::ISO15:  ok = nfc.startEmulationISO15(); break;
-                default: break;
+              if (isNfcUnitMode()) {
+                // NFC Unit supports NTAG213/215/216 via EmulationLayerA, FeliCa via EmulationLayerF
+                switch (et) {
+                  case EmuType::N213:  ok = nfc.startNfcUnitEmulationNtag(213); break;
+                  case EmuType::N215:  ok = nfc.startNfcUnitEmulationNtag(215); break;
+                  case EmuType::N216:  ok = nfc.startNfcUnitEmulationNtag(216); break;
+                  case EmuType::Felica: ok = nfc.startNfcUnitEmulationFelica(); break;
+                  default: break;  // MF1K, ISO14B, ISO15 not supported
+                }
+              } else {
+                nfc.setSlot(nfc_w_emu_slot);
+                switch (et) {
+                  case EmuType::MF1K:  ok = nfc.startEmulationMifare1K(); break;
+                  case EmuType::N213:  ok = nfc.startEmulationNtag213(); break;
+                  case EmuType::N215:  ok = nfc.startEmulationNtag215(); break;
+                  case EmuType::N216:  ok = nfc.startEmulationNtag216(); break;
+                  case EmuType::ISO14B: ok = nfc.startEmulationChinaII(); break;
+                  case EmuType::Felica: ok = nfc.startEmulationFelica(); break;
+                  case EmuType::ISO15:  ok = nfc.startEmulationISO15(); break;
+                  default: break;
+                }
               }
               res.ok = ok;
             }
@@ -2895,7 +3167,11 @@ void nfcWorkerTask(void* /*param*/) {
             break;
           }
           case NfcCmd::StopRF: {
-            nfc.stopRF();
+            if (isNfcUnitMode()) {
+              nfc.stopNfcUnitEmulation();
+            } else {
+              nfc.stopRF();
+            }
             res.ok = true;
             res.done = true;
             nfc_cmd_result = res;
@@ -3097,6 +3373,16 @@ void nfcWorkerTask(void* /*param*/) {
       }
     }
 
+    // --- NFC Unit emulation state machine update ---
+    // emu_a.update() must be called continuously while emulating.
+    // This section runs every task tick (5ms) regardless of current page.
+    if (nfc_ready && isNfcUnitMode() && nfc.isNfcUnitEmulating()) {
+      if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        nfc.tickNfcUnitEmulation();
+        xSemaphoreGive(nfc_mutex);
+      }
+    }
+
     vTaskDelay(pdMS_TO_TICKS(5));  // yield to other tasks
   }
 }
@@ -3218,6 +3504,9 @@ void processHealthResult() {
   if (reconnected) {
     hw_ver = nhw;
     fw_ver = nfw;
+    nfc_module_name = nfc.deviceName();
+    // Clamp home_index in case it exceeds the new page count (e.g. switching from Grove to NFC Unit)
+    if (home_index >= homePageCount()) home_index = 0;
     if (menu_page == MenuPage::Reader) {
       last_card.valid = false;
       last_card.protocol = "None";
@@ -3356,19 +3645,25 @@ void setup() {
   #endif
     );
   M5.Display.setFont(&fonts::Font0);
-
+  // Create off-screen canvas (matches physical display size).
+  // All drawScreen() / animation calls draw here; pushSprite() commits atomically.
+  g_canvas.setColorDepth(16);
+  g_canvas.createSprite(M5.Display.width(), M5.Display.height());
   loadPianoConfig();
 
   nfc_ready = initNfcAtBoot();
+  nfc_module_name = nfc_ready ? String(nfc.deviceName()) : String("GroveNFC");
   hw_ver = nfc.hardwareVersion();
   fw_ver = nfc.firmwareVersion();
   last_card.protocol = "None";
   last_card.detail = nfc_ready ? "Waiting card..." : "No NFC module";
   diagnose_report = "Press hold to run check";
   last_reader_success_ms = millis();
-  drawScreen();
 
   runBootDebugFlow();
+  // runBootDebugFlow() calls goHome() → drawScreen() when kAutoBootDebug=true.
+  // If boot debug is disabled, draw the initial screen here.
+  if (!kAutoBootDebug) drawScreen();
 
   // Start NFC worker task on Core 0
   nfc_mutex = xSemaphoreCreateMutex();
@@ -3422,31 +3717,31 @@ void loop() {
   nfc_w_wifi_popup = wifi_popup;
   nfc_w_piano_stage = piano_stage;
 
-  const bool reader_anim_active = (!in_home && menu_page == MenuPage::Reader && !last_card.valid && nfc_ready);
+  const bool reader_anim_active = (!in_home && menu_page == MenuPage::Reader && !last_card.valid);
   if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
     const bool anim_running = reader_anim_active;
-    if (ui_marquee_active || anim_running) {
-      const uint32_t now = millis();
-      const uint32_t interval = (anim_running && !ui_marquee_active) ? 4 : kUiScrollMs;
-      if (now - last_ui_scroll_ms >= interval) {
-        last_ui_scroll_ms = now;
-        if (anim_running && !ui_marquee_active) {
-          auto& d = M5.Display;
-          const int w = d.width();
-          const int h = d.height();
+    if (anim_running) {
+      auto& d = M5.Display;
+      const int w = d.width();
+      const int h = d.height();
 #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER)
-          if (w > h) {
-            const int header_h = 18;
-            const int content_top = header_h + 2;
-            const int content_h = h - content_top - 2;
-            drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, TFT_GREEN, last_card, reader_14b_only, true);
-          } else {
-            drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
-          }
+      if (w > h) {
+        const int header_h = 18;
+        const int content_top = header_h + 2;
+        const int content_h = h - content_top - 2;
+        drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, TFT_GREEN, last_card, reader_14b_only, true);
+      } else {
+        drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+      }
 #elif defined(APP_TARGET_ATOMS3)
-          drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
 #endif
-        } else {
+    } else {
+      last_reader_anim_us = 0;
+      if (ui_marquee_active) {
+        const uint32_t now = millis();
+        if (now - last_ui_scroll_ms >= kUiScrollMs) {
+          last_ui_scroll_ms = now;
           drawScreen();
         }
       }
@@ -3481,13 +3776,13 @@ void loop() {
 
   if (in_home) {
     if (clicked || key_nav.next) {
-      home_index = (home_index + 1) % static_cast<int>(MenuPage::Count);
-      menu_page = kHomeOrder[home_index];
+      home_index = (home_index + 1) % homePageCount();
+      menu_page = homePageAt(home_index);
       drawScreen();
     }
     if (key_nav.prev) {
-      home_index = (home_index + static_cast<int>(MenuPage::Count) - 1) % static_cast<int>(MenuPage::Count);
-      menu_page = kHomeOrder[home_index];
+      home_index = (home_index + homePageCount() - 1) % homePageCount();
+      menu_page = homePageAt(home_index);
       drawScreen();
     }
     const bool hold_enter = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
@@ -3606,14 +3901,26 @@ void loop() {
       }
     } else {
       if (clicked || key_nav.next) {
-        emu_slot = (emu_slot + 1) % 8;
-        if (nfc_ready) startCurrentEmulation();
-        drawScreen();
+        if (isNfcUnitMode()) {
+          switchEmuType();
+        } else {
+          emu_slot = (emu_slot + 1) % 8;
+          if (nfc_ready) startCurrentEmulation();
+          drawScreen();
+        }
       }
       if (key_nav.prev) {
-        emu_slot = (emu_slot + 7) % 8;
-        if (nfc_ready) startCurrentEmulation();
-        drawScreen();
+        if (isNfcUnitMode()) {
+          // cycle backwards: go to previous type
+          const uint8_t count = static_cast<uint8_t>(EmuType::Count);
+          emu_type = static_cast<EmuType>((static_cast<uint8_t>(emu_type) + count - 1) % count);
+          if (nfc_ready) startCurrentEmulation();
+          drawScreen();
+        } else {
+          emu_slot = (emu_slot + 7) % 8;
+          if (nfc_ready) startCurrentEmulation();
+          drawScreen();
+        }
       }
       const bool hold_open_type_menu = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
       if (hold_open_type_menu || key_nav.confirm) {

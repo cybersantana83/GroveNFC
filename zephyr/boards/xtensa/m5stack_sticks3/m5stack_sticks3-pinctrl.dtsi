@@ -1,0 +1,35 @@
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+
+&pinctrl {
+	/* I2C0: SDA=GPIO9, SCL=GPIO10 (StickS3 Grove port) */
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_GPIO9>,
+			         <I2C0_SCL_GPIO10>;
+			bias-pull-up;
+			drive-open-drain;
+			output-high;
+		};
+	};
+
+	/* SPI2: display (verify actual StickS3 pins from schematic) */
+	spi2_default: spi2_default {
+		group1 {
+			pinmux = <SPIM2_MOSI_GPIO13>,
+			         <SPIM2_SCLK_GPIO14>;
+			output-enable;
+		};
+		group2 {
+			pinmux = <SPIM2_CSEL_GPIO12>;
+			output-enable;
+		};
+	};
+
+	/* LEDC: CH0 = backlight */
+	ledc0_default: ledc0_default {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO27>;
+			output-enable;
+		};
+	};
+};

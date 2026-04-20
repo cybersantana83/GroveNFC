@@ -1,0 +1,126 @@
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_fn8.dtsi>
+#include "m5stack_sticks3-pinctrl.dtsi"
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	model = "M5Stack StickS3";
+	compatible = "m5stack,sticks3";
+
+	chosen {
+		zephyr,sram    = &sram0;
+		zephyr,flash   = &flash0;
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+		zephyr,display = &st7789;
+	};
+
+	aliases {
+		sw0       = &btn_a;
+		sw1       = &btn_b;
+		grove-nfc = &grove_nfc;
+		pwm-tone  = &pwm_tone;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		btn_a: button_a {
+			gpios = <&gpio0 37 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Button A";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+		btn_b: button_b {
+			gpios = <&gpio0 39 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Button B";
+			zephyr,code = <INPUT_KEY_1>;
+		};
+	};
+
+	pwm_tone: pwm-tone {
+		compatible = "pwm-buzzer";
+		pwms = <&ledc0 1 PWM_HZ(1000) PWM_POLARITY_NORMAL>;
+		label = "Tone";
+	};
+};
+
+&usb0 {
+	status = "okay";
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+
+	grove_nfc: grove_nfc@48 {
+		compatible = "seeed,grove-nfc";
+		reg = <0x48>;
+		label = "GROVE_NFC";
+		status = "okay";
+	};
+};
+
+&spi2 {
+	status = "okay";
+	pinctrl-0 = <&spi2_default>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+
+	st7789: st7789@0 {
+		compatible = "sitronix,st7789v";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(40)>;
+		cmd-data-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+		reset-gpios    = <&gpio0 15 GPIO_ACTIVE_LOW>;
+		width    = <135>;
+		height   = <240>;
+		x-offset = <52>;
+		y-offset = <40>;
+		vcom     = <0x2B>;
+		gctrl    = <0x35>;
+		vrhs     = <0x0F>;
+		vdvs     = <0x20>;
+		mdac     = <0x00>;
+		gamma    = <0x01>;
+		colmod   = <0x55>;
+		lcm      = <0x2C>;
+		porch-param  = [0c 0c 00 33 33];
+		cmd2en-param = [5a 69 02 c3];
+		pwctrl1-param = [52 A1];
+		pvgam-param  = [D0 08 0F 0A 0A 26 2D 44 4B 39 14 13 25 2A];
+		nvgam-param  = [D0 08 10 09 09 25 2C 43 4C 38 15 13 24 29];
+		ram-param    = [00 F8];
+		rgb-param    = [CD 08 14];
+	};
+};
+
+&ledc0 {
+	status = "okay";
+	pinctrl-0 = <&ledc0_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	channel0@0 { reg = <0x0>; timer = <0>; };
+	channel1@1 { reg = <0x1>; timer = <1>; };
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		slot0_partition: partition@10000 {
+			label = "image-0";
+			reg = <0x00010000 0x5F0000>;
+		};
+		storage_partition: partition@780000 {
+			label = "storage";
+			reg = <0x00780000 0x80000>;
+		};
+	};
+};

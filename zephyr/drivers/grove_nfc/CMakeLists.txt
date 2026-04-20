@@ -1,0 +1,3 @@
+zephyr_library_named(grove_nfc_drv)
+zephyr_library_sources_ifdef(CONFIG_GROVENFC_DRIVER grove_nfc_drv.c)
+zephyr_library_include_directories(.)
