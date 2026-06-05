@@ -83,6 +83,16 @@ struct CardInfo {
   String detail;
 };
 
+enum class DumpTagType : uint8_t {
+  Mifare1K = 0,
+  Ntag213,
+  Ntag215,
+  Ntag216,
+  ISO14B,
+  Felica,
+  ISO15,
+};
+
 class GroveNFC {
  public:
   explicit GroveNFC(TwoWire& wire) : wire_(wire) {}
@@ -112,6 +122,7 @@ class GroveNFC {
   bool readAny(CardInfo& card);
   bool readOnlyISO14B(CardInfo& card);
   bool readNdef(String& ndef_text, String& detail);
+  bool uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t len);
   const char* deviceName() const;
   uint8_t activeAddress() const { return i2c_addr_; }
 
@@ -133,12 +144,15 @@ class GroveNFC {
   bool writeData(uint16_t reg, const uint8_t* data, uint16_t len);
   bool readData(uint16_t reg, uint8_t* data, uint16_t len);
   bool txrx(const uint8_t* cmd, uint8_t cmd_len, uint8_t* out, uint16_t& out_len, uint16_t wait_ms = 15);
+  bool writeEepromImage(uint16_t tag_addr, const uint8_t* data, size_t len);
+  void clearCustomDumpFlags();
 
   String bytesToHex(const uint8_t* data, size_t len, bool reverse = false);
   void writeMifare1KImage();
   void writeNtag213Image();
   void writeNtag215Image();
   void writeNtag216Image();
+  void writeChinaIIImage();
   void writeISO15Image();
 
   struct NfcUnitBridge;
@@ -151,6 +165,13 @@ class GroveNFC {
   NfcUnitBridge* nfc_unit_bridge_ = nullptr;
 
   uint8_t slot_index_ = 0;
+  bool custom_dump_mifare1k_ = false;
+  bool custom_dump_ntag213_ = false;
+  bool custom_dump_ntag215_ = false;
+  bool custom_dump_ntag216_ = false;
+  bool custom_dump_iso15_ = false;
+  bool custom_dump_iso14b_ = false;
+  bool custom_dump_felica_ = false;
 };
 
 }  // namespace grove_nfc

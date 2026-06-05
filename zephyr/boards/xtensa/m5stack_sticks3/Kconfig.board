@@ -1,3 +1,0 @@
-config BOARD_M5STACK_STICKS3
-    bool "M5Stack StickS3 / StickC Plus2 (ESP32-S3)"
-    depends on SOC_ESP32S3

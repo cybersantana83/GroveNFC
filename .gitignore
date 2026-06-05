@@ -4,3 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 intro/
+.west/
+deps/
+modules/
+build_zephyr_sticks3/

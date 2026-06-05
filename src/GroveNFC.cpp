@@ -59,8 +59,23 @@ static void embed_uid(uint8_t* mem, const uint8_t uid[7]) {
   mem[8] = bcc8(uid + 3, 4);     // BCC1 = UID3 ^ UID4 ^ UID5 ^ UID6
 }
 
-// Fixed UID used for all emulated NFC Unit cards (7-byte, Manufacturer ST)
-static const uint8_t kEmuUID[7] = {0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+static bool extract_uid_from_type2_mem(const uint8_t* mem, size_t len, uint8_t uid[7]) {
+  if (!mem || len < 9 || !uid) return false;
+  const uint8_t bcc0 = bcc8(mem, 3, 0x88);
+  const uint8_t bcc1 = bcc8(mem + 4, 4);
+  if (mem[3] != bcc0 || mem[8] != bcc1) return false;
+  memcpy(uid, mem, 3);
+  memcpy(uid + 3, mem + 4, 4);
+  return true;
+}
+
+static void mirror_ntag213_wrap_pages(uint8_t* mem, size_t len) {
+  if (!mem || len < 192) return;
+  memcpy(mem + 180, mem, 12);
+}
+
+// Fixed UID used for NFC Unit fallback templates.
+static const uint8_t kEmuUID[7] = {0x04, 0x15, 0x91, 0xAA, 0x61, 0x93, 0x1C};
 
 // MIFARE Ultralight memory (64 bytes = 16 pages × 4 bytes)
 // Pages 0-1: UID (filled by embed_uid)
@@ -86,56 +101,32 @@ static const uint8_t kNfcUnitMfulTemplate[64] = {
   0x00, 0x00, 0x00, 0x00,
 };
 
-// NTAG213 memory (180 bytes = 45 pages × 4 bytes)
-// Pages 0-1: UID (filled by embed_uid)
-// Page 2: BCC1 + lock bytes
-// Page 3: CC (NTAG213 capability container)
-// Page 4: NDEF capability bytes
-// Pages 5-39: NDEF TLV with a text record
-// Pages 40-44: NTAG213 config pages
-// NTAG213 memory — exact copy from official M5Stack example
-// https://docs.m5stack.com/en/arduino/projects/unit/unit_nfc
+// NTAG213 memory (180 bytes = 45 pages x 4 bytes), aligned to an iOS-readable sample.
+// Pages 0-2 UID/BCC are filled by embed_uid().
 static const uint8_t kNfcUnitNtag213Template[180] = {
-  // Pages 0-1: UID (filled by embed_uid)
+  // Pages 0-2: UID/BCC/internal/lock bytes
   0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00,
-  // Page 2: Internal + lock bytes
   0x00, 0x48, 0x00, 0x00,
   // Page 3: CC
   0xE1, 0x10, 0x12, 0x00,
-  // Pages 4-27: NDEF data (URL + multilingual text from official example)
+  // Pages 4-9: Lock control TLV + short URI NDEF record (m5stack.com)
   0x01, 0x03, 0xA0, 0x0C,
-  0x34, 0x03, 0x58, 0x91,
-  0x01, 0x0D, 0x55, 0x04,
+  0x34, 0x03, 0x10, 0xD1,
+  0x01, 0x0C, 0x55, 0x04,
   0x6D, 0x35, 0x73, 0x74,
   0x61, 0x63, 0x6B, 0x2E,
-  0x63, 0x6F, 0x6D, 0x2F,
-  0x11, 0x01, 0x11, 0x54,
-  0x02, 0x7A, 0x68, 0xE4,
-  0xBD, 0xA0, 0xE5, 0xA5,
-  0xBD, 0x20, 0x4D, 0x35,
-  0x53, 0x74, 0x61, 0x63,
-  0x6B, 0x11, 0x01, 0x10,
-  0x54, 0x02, 0x65, 0x6E,
-  0x48, 0x65, 0x6C, 0x6C,
-  0x6F, 0x20, 0x4D, 0x35,
-  0x53, 0x74, 0x61, 0x63,
-  0x6B, 0x51, 0x01, 0x1A,
-  0x54, 0x02, 0x6A, 0x61,
-  0xE3, 0x81, 0x93, 0xE3,
-  0x82, 0x93, 0xE3, 0x81,
-  0xAB, 0xE3, 0x81, 0xA1,
-  0xE3, 0x81, 0xAF, 0x20,
-  0x4D, 0x35, 0x53, 0x74,
-  0x61, 0x63, 0x6B, 0xFE,
-  // Pages 28-39: zero padding (12 pages = 48 bytes)
+  0x63, 0x6F, 0x6D, 0xFE,
+  // Pages 10-39: zero padding
   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+  0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+  0,0,0,0, 0,0,0,0,
   // Pages 40-44: NTAG213 config (official values)
   0x00, 0x00, 0x00, 0xBD,
-  0x02, 0x00, 0x00, 0xFF,
-  0x00, 0x00, 0x00, 0x00,
+  0x04, 0x00, 0x00, 0xFF,
+  0x00, 0x05, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00,
 };
@@ -286,12 +277,61 @@ struct GroveNFC::NfcUnitBridge {
   bool is_emulating = false;
   bool emu_is_felica = false;  // true when FeliCa emulation is active
   uint8_t emu_mem_mful[64];
-  uint8_t emu_mem_ntag213[180];
+  uint8_t emu_mem_ntag213[192];
   uint8_t emu_mem_ntag215[540];
   uint8_t emu_mem_ntag216[924];
   uint8_t emu_mem_felica[448];
+  bool custom_mful = false;
+  bool custom_ntag213 = false;
+  bool custom_ntag215 = false;
+  bool custom_ntag216 = false;
+  bool custom_felica = false;
 
   NfcUnitBridge() : nfc_a(unit), nfc_v(unit), nfc_b(unit), emu_a(unit), emu_f(unit) {}
+
+  bool loadDump(DumpTagType type, const uint8_t* data, size_t len) {
+    if (!data || len == 0) return false;
+
+    switch (type) {
+      case DumpTagType::Ntag213: {
+        const size_t n = min(len, static_cast<size_t>(180));
+        memcpy(emu_mem_ntag213, data, n);
+        if (n < sizeof(emu_mem_ntag213)) memset(emu_mem_ntag213 + n, 0, sizeof(emu_mem_ntag213) - n);
+        mirror_ntag213_wrap_pages(emu_mem_ntag213, sizeof(emu_mem_ntag213));
+        custom_ntag213 = true;
+        return true;
+      }
+      case DumpTagType::Ntag215: {
+        const size_t n = min(len, sizeof(emu_mem_ntag215));
+        memcpy(emu_mem_ntag215, data, n);
+        if (n < sizeof(emu_mem_ntag215)) memset(emu_mem_ntag215 + n, 0, sizeof(emu_mem_ntag215) - n);
+        custom_ntag215 = true;
+        return true;
+      }
+      case DumpTagType::Ntag216: {
+        const size_t n = min(len, sizeof(emu_mem_ntag216));
+        memcpy(emu_mem_ntag216, data, n);
+        if (n < sizeof(emu_mem_ntag216)) memset(emu_mem_ntag216 + n, 0, sizeof(emu_mem_ntag216) - n);
+        custom_ntag216 = true;
+        return true;
+      }
+      case DumpTagType::Mifare1K: {
+        // ST25R3916 Type-A emulation is Type-2 focused on this backend.
+        // Do not pretend MF1K upload succeeds, otherwise UI appears updated
+        // while effective emulation data never matches MF1K expectations.
+        return false;
+      }
+      case DumpTagType::Felica: {
+        const size_t n = min(len, sizeof(emu_mem_felica));
+        memcpy(emu_mem_felica, data, n);
+        if (n < sizeof(emu_mem_felica)) memset(emu_mem_felica + n, 0, sizeof(emu_mem_felica) - n);
+        custom_felica = true;
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
 
   // Only switch RF mode when actually needed.
   void switchMode(m5::nfc::NFC mode) {
@@ -474,9 +514,60 @@ struct GroveNFC::NfcUnitBridge {
       return false;
     }
 
-    // Set up PICC with chosen type and fixed UID
+    uint8_t* mem = nullptr;
+    uint32_t sz  = 0;
+
+    if (type == m5::nfc::a::Type::MIFARE_Ultralight) {
+      if (!custom_mful) {
+        memcpy(emu_mem_mful, kNfcUnitMfulTemplate, sizeof(kNfcUnitMfulTemplate));
+        embed_uid(emu_mem_mful, kEmuUID);
+      }
+      mem = emu_mem_mful;
+      sz  = sizeof(emu_mem_mful);
+    } else if (type == m5::nfc::a::Type::NTAG_213) {
+      if (!custom_ntag213) {
+        memcpy(emu_mem_ntag213, kNfcUnitNtag213Template, sizeof(kNfcUnitNtag213Template));
+        memset(emu_mem_ntag213 + sizeof(kNfcUnitNtag213Template), 0, sizeof(emu_mem_ntag213) - sizeof(kNfcUnitNtag213Template));
+        embed_uid(emu_mem_ntag213, kEmuUID);
+        mirror_ntag213_wrap_pages(emu_mem_ntag213, sizeof(emu_mem_ntag213));
+      }
+      mem = emu_mem_ntag213;
+      sz  = sizeof(emu_mem_ntag213);
+    } else if (type == m5::nfc::a::Type::NTAG_215) {
+      if (!custom_ntag215) {
+        memcpy(emu_mem_ntag215, kNfcUnitNtag215Template, sizeof(kNfcUnitNtag215Template));
+        embed_uid(emu_mem_ntag215, kEmuUID);
+      }
+      mem = emu_mem_ntag215;
+      sz  = sizeof(emu_mem_ntag215);
+    } else if (type == m5::nfc::a::Type::NTAG_216) {
+      if (!custom_ntag216) {
+        memcpy(emu_mem_ntag216, kNfcUnitNtag216Template, sizeof(kNfcUnitNtag216Template));
+        embed_uid(emu_mem_ntag216, kEmuUID);
+      }
+      mem = emu_mem_ntag216;
+      sz  = sizeof(emu_mem_ntag216);
+    }
+
+    if (!mem || sz == 0) {
+      cfg.emulation = false;
+      unit.config(cfg);
+      units.begin();
+      return false;
+    }
+
+    uint8_t picc_uid[7] = {0};
+    memcpy(picc_uid, kEmuUID, sizeof(picc_uid));
+    if (extract_uid_from_type2_mem(mem, sz, picc_uid)) {
+      Serial.printf("[EMU] UID from dump: %02X%02X%02X%02X%02X%02X%02X\n",
+                    picc_uid[0], picc_uid[1], picc_uid[2], picc_uid[3], picc_uid[4], picc_uid[5], picc_uid[6]);
+    } else {
+      embed_uid(mem, picc_uid);
+      Serial.println("[EMU] UID fallback: embedded default UID");
+    }
+
     m5::nfc::a::PICC picc{};
-    bool emulated = picc.emulate(type, kEmuUID, sizeof(kEmuUID));
+    bool emulated = picc.emulate(type, picc_uid, sizeof(picc_uid));
     Serial.printf("[EMU] picc.emulate(type=%d) -> %d valid=%d\n", (int)type, (int)emulated, (int)picc.valid());
     if (!emulated) {
       cfg.emulation = false;
@@ -485,32 +576,7 @@ struct GroveNFC::NfcUnitBridge {
       return false;
     }
 
-    uint8_t* mem = nullptr;
-    uint32_t sz  = 0;
-
-    if (type == m5::nfc::a::Type::MIFARE_Ultralight) {
-      memcpy(emu_mem_mful, kNfcUnitMfulTemplate, sizeof(kNfcUnitMfulTemplate));
-      embed_uid(emu_mem_mful, kEmuUID);
-      mem = emu_mem_mful;
-      sz  = sizeof(emu_mem_mful);
-    } else if (type == m5::nfc::a::Type::NTAG_213) {
-      memcpy(emu_mem_ntag213, kNfcUnitNtag213Template, sizeof(kNfcUnitNtag213Template));
-      embed_uid(emu_mem_ntag213, kEmuUID);
-      mem = emu_mem_ntag213;
-      sz  = sizeof(emu_mem_ntag213);
-    } else if (type == m5::nfc::a::Type::NTAG_215) {
-      memcpy(emu_mem_ntag215, kNfcUnitNtag215Template, sizeof(kNfcUnitNtag215Template));
-      embed_uid(emu_mem_ntag215, kEmuUID);
-      mem = emu_mem_ntag215;
-      sz  = sizeof(emu_mem_ntag215);
-    } else if (type == m5::nfc::a::Type::NTAG_216) {
-      memcpy(emu_mem_ntag216, kNfcUnitNtag216Template, sizeof(kNfcUnitNtag216Template));
-      embed_uid(emu_mem_ntag216, kEmuUID);
-      mem = emu_mem_ntag216;
-      sz  = sizeof(emu_mem_ntag216);
-    }
-
-    bool emu_started_ok = mem && emu_a.begin(picc, mem, sz);
+    bool emu_started_ok = emu_a.begin(picc, mem, sz);
     Serial.printf("[EMU] emu_a.begin(mem=%p sz=%u) -> %d state=%d\n", mem, (unsigned)sz, (int)emu_started_ok, (int)emu_a.state());
     if (!emu_started_ok) {
       cfg.emulation = false;
@@ -565,7 +631,9 @@ struct GroveNFC::NfcUnitBridge {
     }
 
     // Prepare memory
-    memcpy(emu_mem_felica, kNfcUnitFelicaTemplate, sizeof(kNfcUnitFelicaTemplate));
+    if (!custom_felica) {
+      memcpy(emu_mem_felica, kNfcUnitFelicaTemplate, sizeof(kNfcUnitFelicaTemplate));
+    }
 
     bool emu_started_ok = emu_f.begin(picc, emu_mem_felica, sizeof(emu_mem_felica));
     Serial.printf("[EMU-F] emu_f.begin() -> %d state=%d\n", (int)emu_started_ok, (int)emu_f.state());
@@ -696,12 +764,17 @@ struct GroveNFC::NfcUnitBridge {
 
 namespace {
 constexpr uint16_t kTagAddrNtag213 = 0x0000;
-constexpr uint16_t kTagAddrISO15 = 0x7000;
-constexpr uint16_t kTagAddr14B = 0x0000;
-constexpr uint16_t kTagAddrFelica = 0x0000;
 constexpr uint16_t kTagAddrNtag215 = 0x1000;
 constexpr uint16_t kTagAddrNtag216 = 0x2000;
 constexpr uint16_t kTagAddrMifare1k = 0x3000;
+constexpr uint16_t kTagAddr14B = 0x4000;  // dedicated address, avoids conflict with kTagAddrNtag213
+constexpr uint16_t kTagAddrISO15 = 0x7000;
+constexpr size_t kNtag213ImageSize = 180;
+constexpr size_t kNtag215ImageSize = 540;
+constexpr size_t kNtag216ImageSize = 924;
+constexpr size_t kMifare1kImageSize = 1024;
+constexpr size_t kISO14BImageSize = 4;   // PUPI is 4 bytes
+constexpr size_t kISO15ImageSize = 256;
 
 const uint8_t kNtag213Header[] = {
     0x04, 0x31, 0x1D, 0xA0,
@@ -1038,17 +1111,109 @@ bool GroveNFC::setSlot(uint8_t slot) {
   return writeMiscReg(I2cMiscReg_SetSlot_Addr, slot_index_);
 }
 
-bool GroveNFC::startEmulationMifare1K() {
+void GroveNFC::clearCustomDumpFlags() {
+  custom_dump_mifare1k_ = false;
+  custom_dump_ntag213_ = false;
+  custom_dump_ntag215_ = false;
+  custom_dump_ntag216_ = false;
+  custom_dump_iso15_ = false;
+  custom_dump_iso14b_ = false;
+  custom_dump_felica_ = false;
+}
+
+bool GroveNFC::writeEepromImage(uint16_t tag_addr, const uint8_t* data, size_t len) {
+  if (!data || len == 0 || len > 0xFFFFu) return false;
+
+  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
+  delay(2);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, tag_addr);
+  delay(2);
+
+  constexpr size_t kChunk = 32;
+  size_t off = 0;
+  while (off < len) {
+    const size_t n = min(kChunk, len - off);
+    if (!writeData(static_cast<uint16_t>(I2cEpromReg_Addr + off), data + off, static_cast<uint16_t>(n))) {
+      return false;
+    }
+    off += n;
+    delay(2);
+  }
+
+  if (!writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE)) return false;
+  delay(320);
+  return true;
+}
+
+bool GroveNFC::uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t len) {
+  if (!data || len == 0) return false;
+
   if (is_nfc_unit_) {
 #if GROVENFC_HAS_M5UNIT_BACKEND
     if (!nfc_unit_bridge_) return false;
-    // ST25R3916 supports Type 2 tag emulation only; map MF1K slot to MFUL
-    return nfc_unit_bridge_->beginEmulation(m5::nfc::a::Type::MIFARE_Ultralight);
+    const bool ok = nfc_unit_bridge_->loadDump(type, data, len);
+    if (!ok) return false;
+    switch (type) {
+      case DumpTagType::Mifare1K: custom_dump_mifare1k_ = true; break;
+      case DumpTagType::Ntag213: custom_dump_ntag213_ = true; break;
+      case DumpTagType::Ntag215: custom_dump_ntag215_ = true; break;
+      case DumpTagType::Ntag216: custom_dump_ntag216_ = true; break;
+      case DumpTagType::Felica: custom_dump_felica_ = true; break;
+      default: break;
+    }
+    return true;
 #else
     return false;
 #endif
   }
-  writeMifare1KImage();
+
+  bool ok = false;
+  switch (type) {
+    case DumpTagType::Mifare1K:
+      ok = writeEepromImage(kTagAddrMifare1k, data, min(len, kMifare1kImageSize));
+      custom_dump_mifare1k_ = ok;
+      break;
+    case DumpTagType::Ntag213:
+      ok = writeEepromImage(kTagAddrNtag213, data, min(len, kNtag213ImageSize));
+      custom_dump_ntag213_ = ok;
+      break;
+    case DumpTagType::Ntag215:
+      ok = writeEepromImage(kTagAddrNtag215, data, min(len, kNtag215ImageSize));
+      custom_dump_ntag215_ = ok;
+      break;
+    case DumpTagType::Ntag216:
+      ok = writeEepromImage(kTagAddrNtag216, data, min(len, kNtag216ImageSize));
+      custom_dump_ntag216_ = ok;
+      break;
+    case DumpTagType::ISO15:
+      ok = writeEepromImage(kTagAddrISO15, data, min(len, kISO15ImageSize));
+      custom_dump_iso15_ = ok;
+      break;
+    case DumpTagType::ISO14B:
+      ok = writeEepromImage(kTagAddr14B, data, min(len, kISO14BImageSize));
+      custom_dump_iso14b_ = ok;
+      break;
+    case DumpTagType::Felica:
+      custom_dump_felica_ = false;
+      ok = false;
+      break;
+    default:
+      ok = false;
+      break;
+  }
+  return ok;
+}
+
+bool GroveNFC::startEmulationMifare1K() {
+  if (is_nfc_unit_) {
+#if GROVENFC_HAS_M5UNIT_BACKEND
+    // NFC Unit backend does not support true MF1K card emulation.
+    return false;
+#else
+    return false;
+#endif
+  }
+  if (!custom_dump_mifare1k_) writeMifare1KImage();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1066,7 +1231,7 @@ bool GroveNFC::startEmulationNtag213() {
     return false;
 #endif
   }
-  writeNtag213Image();
+  if (!custom_dump_ntag213_) writeNtag213Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1079,13 +1244,12 @@ bool GroveNFC::startEmulationNtag215() {
   if (is_nfc_unit_) {
 #if GROVENFC_HAS_M5UNIT_BACKEND
     if (!nfc_unit_bridge_) return false;
-    // NTAG215/216 not supported by ST25R3916 emulation; fall back to NTAG213
-    return nfc_unit_bridge_->beginEmulation(m5::nfc::a::Type::NTAG_213);
+    return nfc_unit_bridge_->beginEmulation(m5::nfc::a::Type::NTAG_215);
 #else
     return false;
 #endif
   }
-  writeNtag215Image();
+  if (!custom_dump_ntag215_) writeNtag215Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1098,12 +1262,12 @@ bool GroveNFC::startEmulationNtag216() {
   if (is_nfc_unit_) {
 #if GROVENFC_HAS_M5UNIT_BACKEND
     if (!nfc_unit_bridge_) return false;
-    return nfc_unit_bridge_->beginEmulation(m5::nfc::a::Type::NTAG_213);
+    return nfc_unit_bridge_->beginEmulation(m5::nfc::a::Type::NTAG_216);
 #else
     return false;
 #endif
   }
-  writeNtag216Image();
+  if (!custom_dump_ntag216_) writeNtag216Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1114,6 +1278,7 @@ bool GroveNFC::startEmulationNtag216() {
 
 bool GroveNFC::startEmulationChinaII() {
   if (is_nfc_unit_) return false;
+  if (!custom_dump_iso14b_) writeChinaIIImage();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1123,18 +1288,14 @@ bool GroveNFC::startEmulationChinaII() {
 }
 
 bool GroveNFC::startEmulationFelica() {
-  if (is_nfc_unit_) return false;
-  // The reference firmware exposes FeliCa reader only and no FeliCa tag-mode constant.
-  // Returning false avoids entering an invalid emulation mode.
-  stopRF();
-  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
-  (void)kTagAddrFelica;
+  // Grove NFC firmware has no Felica tag-emulation mode register constant.
+  // Hardware only supports Felica in reader/polling mode, not as a card emulator.
   return false;
 }
 
 bool GroveNFC::startEmulationISO15() {
   if (is_nfc_unit_) return false;
-  writeISO15Image();
+  if (!custom_dump_iso15_) writeISO15Image();
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1908,6 +2069,20 @@ String GroveNFC::bytesToHex(const uint8_t* data, size_t len, bool reverse) {
     }
   }
   return out;
+}
+
+void GroveNFC::writeChinaIIImage() {
+  // China II (ISO14B) EEPROM image: first 4 bytes are the PUPI (ATQB identifier).
+  // Default PUPI matches the UI display placeholder "11223344".
+  const uint8_t pupi[kISO14BImageSize] = {0x11, 0x22, 0x33, 0x44};
+  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
+  delay(2);
+  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddr14B);
+  delay(2);
+  writeData(I2cEpromReg_Addr, pupi, sizeof(pupi));
+  delay(2);
+  writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
+  delay(250);
 }
 
 void GroveNFC::writeNtag213Image() {
