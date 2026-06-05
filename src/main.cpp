@@ -231,6 +231,7 @@ uint8_t dumps_menu_index = 0;
 bool dumps_pick_for_emu = false;
 String dumps_preview_text;
 size_t dumps_preview_offset = 0;
+uint8_t dumps_preview_font_level = 1;
 String emu_ap_last_upload_path;
 String dumps_qr_payload;
 bool dumps_qr_wifi = true;
@@ -537,7 +538,7 @@ void playNdefTone(bool is_wifi) {
 }
 
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
-const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles};
+const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano};
 // Keep the same accent palette for both GroveNFC and NFC Unit to avoid UI mismatch.
 
 inline bool isNfcUnitMode() { return nfc_module_name == "NFC Unit"; }
@@ -620,7 +621,7 @@ uint8_t dumpMenuCount() {
 }
 
 uint8_t dumpsMenuCount() {
-  return dumps_pick_for_emu ? 1 : 3;
+  return dumps_pick_for_emu ? 1 : 4;
 }
 
 bool dumpsMenuItemDisabled(uint8_t idx) {
@@ -1037,13 +1038,149 @@ bool dumpFileLikelyMatchesType(const String& path, EmuType target_type, bool str
   return true;
 }
 
-size_t dumpsPreviewPageChars(int width, int height) {
-  const int line_h = 18;
-  const int char_w = 12;
-  const int max_lines = max(1, (height - 22) / line_h);
-  const int max_chars = max(1, (width - 4) / char_w - 1);
-  const size_t page = static_cast<size_t>(max_lines) * static_cast<size_t>(max_chars);
-  return max(static_cast<size_t>(32), page);
+void dumpsPreviewApplyFont(lgfx::v1::LGFXBase& d, uint8_t level, int& line_h_out) {
+  switch (level & 0x03u) {
+    case 0:
+      d.setFont(&fonts::Font0);
+      d.setTextSize(1);
+      break;
+    case 1:
+      d.setFont(&fonts::Font2);
+      d.setTextSize(1);
+      break;
+    case 2:
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      break;
+    default:
+      d.setFont(&fonts::Font2);
+      d.setTextSize(2);
+      break;
+  }
+  line_h_out = d.fontHeight() + 1;
+}
+
+size_t dumpsPreviewPageLines(int height, int line_h) {
+  return static_cast<size_t>(max(1, height / max(1, line_h)));
+}
+
+size_t dumpsPreviewCountLines(const String& text) {
+  if (text.isEmpty()) return 0;
+  size_t lines = 1;
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (text[i] == '\n') ++lines;
+  }
+  return lines;
+}
+
+bool dumpsPreviewParseBlockLine(const String& line, size_t& block_index, size_t& hex_start, size_t& byte_count) {
+  block_index = 0;
+  hex_start = 0;
+  byte_count = 0;
+
+  const int colon = line.indexOf(':');
+  if (colon <= 0) return false;
+
+  unsigned long id = 0;
+  for (int i = 0; i < colon; ++i) {
+    const char c = line[static_cast<size_t>(i)];
+    if (c < '0' || c > '9') return false;
+    id = id * 10ul + static_cast<unsigned long>(c - '0');
+    if (id > 65535ul) return false;
+  }
+  if (id == 0) return false;
+
+  hex_start = static_cast<size_t>(colon + 1);
+  while (hex_start < line.length() && line[hex_start] == ' ') ++hex_start;
+  if (hex_start >= line.length()) return false;
+
+  const size_t hex_len = line.length() - hex_start;
+  if (hex_len == 0 || (hex_len % 2u) != 0u) return false;
+
+  for (size_t i = hex_start; i < line.length(); ++i) {
+    const char c = line[i];
+    const bool is_hex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+    if (!is_hex) return false;
+  }
+
+  block_index = static_cast<size_t>(id - 1ul);
+  byte_count = hex_len / 2u;
+  return true;
+}
+
+uint16_t dumpsPreviewByteColor(const String& type_label, size_t block_index, size_t byte_index, size_t bytes_per_block) {
+  constexpr uint16_t kColUid = 0x07FF;     // cyan
+  constexpr uint16_t kColBcc = 0xFD20;     // orange
+  constexpr uint16_t kColKeyA = 0x07E0;    // green
+  constexpr uint16_t kColAccess = 0xFFE0;  // yellow
+  constexpr uint16_t kColKeyB = 0xF81F;    // magenta
+
+  const bool is_mfc = type_label.startsWith("MFC");
+
+  if (is_mfc && bytes_per_block >= 16u) {
+    if (block_index == 0u) {
+      if (byte_index <= 3u) return kColUid;
+      if (byte_index == 4u) return kColBcc;
+    }
+    if (((block_index + 1u) % 4u) == 0u) {
+      if (byte_index < 6u) return kColKeyA;
+      if (byte_index < 10u) return kColAccess;
+      return kColKeyB;
+    }
+    return TFT_WHITE;
+  }
+
+  if (bytes_per_block == 4u) {
+    if (block_index == 0u) {
+      if (byte_index <= 2u) return kColUid;
+      if (byte_index == 3u) return kColBcc;
+    } else if (block_index == 1u && byte_index <= 3u) {
+      return kColUid;
+    } else if (block_index == 2u && byte_index == 0u) {
+      return kColBcc;
+    }
+    return TFT_WHITE;
+  }
+
+  if (block_index == 0u && byte_index < min(static_cast<size_t>(8), bytes_per_block)) {
+    return kColUid;
+  }
+  return TFT_WHITE;
+}
+
+void drawDumpPreviewLine(lgfx::v1::LGFXBase& d,
+                         int x,
+                         int y,
+                         const String& line,
+                         const String& type_label,
+                         uint16_t accent) {
+  size_t block_index = 0;
+  size_t hex_start = 0;
+  size_t byte_count = 0;
+  if (!dumpsPreviewParseBlockLine(line, block_index, hex_start, byte_count)) {
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setCursor(x, y);
+    d.print(line);
+    return;
+  }
+
+  const String prefix = line.substring(0, hex_start);
+  d.setTextColor(accent, TFT_BLACK);
+  d.setCursor(x, y);
+  d.print(prefix);
+
+  const int char_w = max(1, d.textWidth("0"));
+  const int byte_w = char_w * 2;
+  int cx = x + d.textWidth(prefix);
+
+  for (size_t i = 0; i < byte_count; ++i) {
+    const size_t begin = hex_start + i * 2u;
+    const String hex = line.substring(begin, begin + 2u);
+    d.setTextColor(dumpsPreviewByteColor(type_label, block_index, i, byte_count), TFT_BLACK);
+    d.setCursor(cx, y);
+    d.print(hex);
+    cx += byte_w;
+  }
 }
 
 bool mapPm3FileTypeToEmuType(String file_type, EmuType& out) {
@@ -1272,32 +1409,110 @@ String buildDumpPreview(const String& path) {
   String preview = dumpDisplayName(path, 24) + "\n";
   preview += dumpTypeLabel(path) + "  " + String(static_cast<size_t>(f.size())) + " bytes\n";
 
+  auto appendBlockLines = [&](const uint8_t* data, size_t len, size_t block_size) {
+    if (data == nullptr || len == 0) {
+      preview += "No block data\n";
+      return;
+    }
+    if (block_size == 0) block_size = 4;
+
+    const size_t block_count = (len + block_size - 1) / block_size;
+    preview += "Blocks: " + String(block_count) + "\n";
+
+    const char* hex_chars = "0123456789ABCDEF";
+    for (size_t b = 0; b < block_count; ++b) {
+      preview += String(static_cast<unsigned>(b + 1));
+      preview += ": ";
+
+      const size_t begin = b * block_size;
+      const size_t end = min(len, begin + block_size);
+      for (size_t i = begin; i < end; ++i) {
+        preview += hex_chars[(data[i] >> 4) & 0x0F];
+        preview += hex_chars[data[i] & 0x0F];
+      }
+      if (b + 1 < block_count) preview += '\n';
+    }
+  };
+
   String lower = path;
   lower.toLowerCase();
   if (lower.endsWith(".json")) {
-    size_t count = 0;
-    while (f.available() && count < 180) {
-      char c = static_cast<char>(f.read());
-      if (c == '\r') continue;
-      if (c == '\n' || (c >= 32 && c <= 126)) {
-        preview += c;
-        ++count;
+    String json;
+    json.reserve(static_cast<size_t>(f.size()) + 1);
+    while (f.available()) json += static_cast<char>(f.read());
+
+    EmuType type = EmuType::N213;
+    String type_hint;
+    bool has_type_hint = false;
+    if (extractJsonValue(json, "FileType", type_hint) && mapPm3FileTypeToEmuType(type_hint, type)) {
+      has_type_hint = true;
+    } else if ((extractJsonValue(json, "type", type_hint) ||
+                extractJsonValue(json, "tagType", type_hint) ||
+                extractJsonValue(json, "protocol", type_hint) ||
+                extractJsonValue(json, "emuType", type_hint)) &&
+               mapTypeHintToEmuType(type_hint, type)) {
+      has_type_hint = true;
+    }
+
+    size_t block_size_hint = 0;
+    if (has_type_hint) {
+      block_size_hint = (type == EmuType::MF1K) ? 16 : 4;
+    }
+
+    String blocks_obj;
+    if (extractJsonValue(json, "blocks", blocks_obj) && blocks_obj.startsWith("{")) {
+      uint8_t dump[kEmuDumpMaxBytes] = {0};
+      size_t out_len = 0;
+      size_t out_blocks = 0;
+      if (parseJsonBlocksObject(blocks_obj,
+                                dump,
+                                sizeof(dump),
+                                static_cast<uint8_t>(block_size_hint),
+                                out_len,
+                                out_blocks) && out_len > 0) {
+        size_t block_size = block_size_hint;
+        if (block_size == 0) {
+          if ((out_len % 16u) == 0u && out_len >= 64u) block_size = 16;
+          else block_size = 4;
+        }
+        appendBlockLines(dump, out_len, block_size);
+        return preview;
       }
     }
+
+    String payload;
+    if (extractJsonValue(json, "data", payload) || extractJsonValue(json, "dump", payload) ||
+        extractJsonValue(json, "bytes", payload) || extractJsonValue(json, "hex", payload) ||
+        extractJsonValue(json, "bin", payload)) {
+      uint8_t dump[kEmuDumpMaxBytes] = {0};
+      size_t out_len = 0;
+      const bool ok = payload.startsWith("[") ? parseByteArray(payload, dump, out_len)
+                                               : parseHexBytes(payload, dump, out_len);
+      if (ok && out_len > 0) {
+        size_t block_size = block_size_hint;
+        if (block_size == 0) {
+          if ((out_len % 16u) == 0u && out_len >= 64u) block_size = 16;
+          else block_size = 4;
+        }
+        appendBlockLines(dump, out_len, block_size);
+        return preview;
+      }
+    }
+
+    preview += "No parsable block data";
     return preview;
   }
 
-  const char* hex_chars = "0123456789ABCDEF";
-  uint8_t row[16] = {0};
-  for (uint8_t line = 0; line < 4 && f.available(); ++line) {
-    const size_t got = f.read(row, sizeof(row));
-    for (size_t i = 0; i < got; ++i) {
-      preview += hex_chars[(row[i] >> 4) & 0x0F];
-      preview += hex_chars[row[i] & 0x0F];
-      if (i + 1 < got) preview += ' ';
-    }
-    if (line < 3 && f.available()) preview += '\n';
-  }
+  uint8_t dump[kEmuDumpMaxBytes] = {0};
+  const size_t got = f.read(dump, sizeof(dump));
+  if (got == 0) return preview + "No block data";
+
+  size_t block_size = 4;
+  const String type_label = dumpTypeLabel(path);
+  if (type_label.startsWith("MFC")) block_size = 16;
+  else if (type_label == "Unknown" && (got % 16u) == 0u && got >= 64u) block_size = 16;
+
+  appendBlockLines(dump, got, block_size);
   return preview;
 }
 
@@ -3262,8 +3477,9 @@ const char* dumpsMenuLabel(uint8_t idx) {
 
   switch (idx) {
     case 0: return "Emulate";
-    case 1: return "Web QR";
-    case 2: return "Exit";
+    case 1: return "Preview";
+    case 2: return "Web QR";
+    case 3: return "Exit";
     default: return "";
   }
 }
@@ -3324,6 +3540,74 @@ void drawDumpsPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
     d.fillRect(x, y, w, h, TFT_BLACK);
     d.fillRect(qr_x - border, qr_y - border, qr_size + border * 2, qr_size + border * 2, TFT_WHITE);
     d.qrcode(dumps_qr_payload, qr_x, qr_y, qr_size, 0);
+    return;
+  }
+
+  if (dumps_stage == DumpsStage::Preview) {
+    d.fillRect(x, y, w, h, TFT_BLACK);
+
+    if (dumps_preview_text.isEmpty() && emu_dump_count > 0 && dump_file_index < emu_dump_count) {
+      dumps_preview_text = buildDumpPreview(emu_dump_files[dump_file_index]);
+      dumps_preview_offset = 0;
+    }
+
+    const int text_x = x + 2;
+    const int text_y = y + 1;
+    const int text_w = max(12, w - 4);
+    int line_h = 10;
+    dumpsPreviewApplyFont(d, dumps_preview_font_level, line_h);
+    const int footer_h = d.fontHeight() + 1;
+    const int text_h = max(20, h - footer_h - 2);
+    d.setTextWrap(false);
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    const size_t page_lines = dumpsPreviewPageLines(text_h, line_h);
+    const size_t total_lines = dumpsPreviewCountLines(dumps_preview_text);
+    if (total_lines > 0 && dumps_preview_offset >= total_lines) dumps_preview_offset = 0;
+    const size_t page_start = (total_lines == 0) ? 0 : dumps_preview_offset;
+
+    String preview_type = "Unknown";
+    if (emu_dump_count > 0 && dump_file_index < emu_dump_count) {
+      preview_type = dumpTypeLabel(emu_dump_files[dump_file_index]);
+    }
+
+    size_t line_idx = 0;
+    size_t pos = 0;
+    while (line_idx < page_start && pos < dumps_preview_text.length()) {
+      const int newline = dumps_preview_text.indexOf('\n', pos);
+      if (newline < 0) {
+        pos = dumps_preview_text.length();
+      } else {
+        pos = static_cast<size_t>(newline + 1);
+      }
+      ++line_idx;
+    }
+
+    for (size_t i = 0; i < page_lines && pos <= dumps_preview_text.length(); ++i) {
+      size_t end = dumps_preview_text.length();
+      const int newline = (pos < dumps_preview_text.length()) ? dumps_preview_text.indexOf('\n', pos) : -1;
+      if (newline >= 0) end = static_cast<size_t>(newline);
+      const String line = dumps_preview_text.substring(pos, end);
+      drawDumpPreviewLine(d,
+                          text_x,
+                          text_y + static_cast<int>(i) * line_h,
+                          line,
+                          preview_type,
+                          accent);
+      if (newline < 0) break;
+      pos = end + 1u;
+    }
+
+    const size_t page_index = (total_lines == 0) ? 1 : (page_start / page_lines) + 1;
+    const size_t page_total = (total_lines == 0) ? 1 : ((total_lines + page_lines - 1) / page_lines);
+    const String footer = String("A:Next Hold:Back B:Font");
+    const String page_text = String(page_index) + "/" + String(page_total);
+    d.setTextColor(accent, TFT_BLACK);
+    d.setCursor(x + 2, y + h - d.fontHeight() - 1);
+    d.print(footer);
+    const int page_x = max(x + 2, x + w - 2 - d.textWidth(page_text));
+    d.setCursor(page_x, y + h - d.fontHeight() - 1);
+    d.print(page_text);
+    d.setTextWrap(true);
     return;
   }
 
@@ -3504,6 +3788,51 @@ void drawPixelFrame(lgfx::v1::LGFXBase& d, int x, int y, int width, int height, 
   d.fillRect(x + width - 4, y + height - 3, 2, 2, color);
 }
 
+void drawHomeIconReader(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
+  const int x = cx - 24;
+  const int y = cy - 16;
+  d.fillRect(x, y, 28, 24, accent);
+  d.fillRect(x + 4, y + 4, 20, 12, TFT_BLACK);
+  d.fillRect(x + 4, y + 18, 20, 3, accent);
+
+  d.fillRect(x + 32, y + 9, 3, 6, accent);
+  d.fillRect(x + 36, y + 6, 3, 12, accent);
+  d.fillRect(x + 40, y + 3, 3, 18, accent);
+}
+
+void drawHomeIconEmulator(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
+  const int x = cx - 18;
+  const int y = cy - 18;
+  const int s = 36;
+
+  d.drawRect(x, y, s, s, accent);
+  d.drawRect(x + 1, y + 1, s - 2, s - 2, accent);
+
+  d.fillRect(x + 4, y + 4, s - 8, 3, accent);
+  d.fillRect(x + s - 7, y + 4, 3, s - 11, accent);
+  d.fillRect(x + 10, y + s - 10, s - 17, 3, accent);
+  d.fillRect(x + 10, y + 10, 3, s - 20, accent);
+  d.fillRect(x + 10, y + 10, s - 20, 3, accent);
+  d.fillRect(x + s - 13, y + 10, 3, s - 26, accent);
+  d.fillRect(x + 16, y + s - 16, s - 29, 3, accent);
+}
+
+void drawHomeIconDumps(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
+  const int x = cx - 19;
+  const int y = cy - 18;
+
+  d.drawRect(x, y, 38, 36, accent);
+  d.drawRect(x + 1, y + 1, 36, 34, accent);
+
+  d.fillRect(x + 6, y + 6, 16, 3, accent);
+  d.fillRect(x + 6, y + 6, 3, 12, accent);
+  d.fillRect(x + 6, y + 16, 10, 3, accent);
+
+  d.fillRect(x + 20, y + 17, 12, 3, accent);
+  d.fillRect(x + 29, y + 17, 3, 12, accent);
+  d.fillRect(x + 16, y + 27, 16, 3, accent);
+}
+
 void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t accent, int8_t page_idx) {
   d.fillRect(x, y, w, h, TFT_BLACK);
   d.setFont(&fonts::Font0);
@@ -3523,15 +3852,12 @@ void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
     d.setTextColor(TFT_WHITE, TFT_BLACK);
     d.setCursor(x + 2 + indent, ty); d.print("whywilson/GroveNFC"); ty += line_h;
   } else {
-    const char* url = "https://github.com/whywilson/GroveNFC";
-    const int border = 2;
-    const int margin = 2;
-    const int qr_max_h = h - margin * 2 - 2;
-    const int qr_max_w = w - margin * 2 - 4;
-    const int qr_size = max(24, min(qr_max_h, qr_max_w));
+    const char* url = "github.com/whywilson/GroveNFC";
+    const int qr_size = max(24, min(w, h));
     const int qr_x = x + (w - qr_size) / 2;
     const int qr_y = y + (h - qr_size) / 2;
-    d.fillRect(qr_x - border, qr_y - border, qr_size + border * 2, qr_size + border * 2, TFT_WHITE);
+    d.fillRect(x, y, w, h, TFT_BLACK);
+    d.fillRect(qr_x, qr_y, qr_size, qr_size, TFT_WHITE);
     d.qrcode(url, qr_x, qr_y, qr_size, 0);
   }
 }
@@ -4301,12 +4627,7 @@ void drawScreen(bool popup_only = false) {
         d.fillRect(w / 2 - 2, icon_cy - 8, 4, 4, accent);
         d.fillRect(w / 2 - 2, icon_cy - 1, 4, 11, accent);
       } else if (menu_page == MenuPage::Reader) {
-        d.fillRect(w / 2 - 20, icon_cy - 8, 24, 20, accent);
-        d.fillRect(w / 2 - 16, icon_cy - 4, 16, 8, TFT_BLACK);
-        d.fillRect(w / 2 - 16, icon_cy + 6, 16, 3, accent);
-        d.fillRect(w / 2 + 8, icon_cy - 2, 3, 8, accent);
-        d.fillRect(w / 2 + 12, icon_cy - 6, 3, 16, accent);
-        d.fillRect(w / 2 + 16, icon_cy - 10, 3, 24, accent);
+        drawHomeIconReader(d, w / 2, icon_cy, accent);
       } else if (menu_page == MenuPage::ReadNDEF) {
         d.fillRect(w / 2 - 16, icon_cy - 18, 30, 34, accent);
         d.fillRect(w / 2 - 12, icon_cy - 14, 22, 26, TFT_BLACK);
@@ -4316,12 +4637,9 @@ void drawScreen(bool popup_only = false) {
         d.fillRect(w / 2 - 8, icon_cy, 14, 3, accent);
         d.fillRect(w / 2 - 8, icon_cy + 6, 10, 3, accent);
       } else if (menu_page == MenuPage::WebFiles) {
-        d.drawRect(w / 2 - 20, icon_cy - 16, 40, 26, accent);
-        d.fillRect(w / 2 - 16, icon_cy - 12, 8, 8, accent);
-        d.fillRect(w / 2 - 4, icon_cy - 12, 8, 8, accent);
-        d.fillRect(w / 2 + 8, icon_cy - 12, 8, 8, accent);
-        d.fillRect(w / 2 - 6, icon_cy + 2, 12, 3, accent);
-        d.fillRect(w / 2 - 2, icon_cy + 5, 4, 5, accent);
+        drawHomeIconDumps(d, w / 2, icon_cy, accent);
+      } else if (menu_page == MenuPage::Emulator) {
+        drawHomeIconEmulator(d, w / 2, icon_cy, accent);
       } else if (menu_page == MenuPage::Piano) {
         d.fillRect(w / 2 - 18, icon_cy - 18, 36, 30, accent);
         d.fillRect(w / 2 - 14, icon_cy - 14, 28, 22, TFT_BLACK);
@@ -4329,14 +4647,6 @@ void drawScreen(bool popup_only = false) {
         d.fillRect(w / 2 - 4, icon_cy - 10, 3, 18, accent);
         d.fillRect(w / 2 + 2, icon_cy - 10, 3, 18, accent);
         d.fillRect(w / 2 + 8, icon_cy - 10, 3, 18, accent);
-      } else {
-        d.fillRect(w / 2 - 22, icon_cy - 10, 16, 22, accent);
-        d.fillRect(w / 2 - 18, icon_cy - 6, 8, 10, TFT_BLACK);
-        d.fillRect(w / 2 + 6, icon_cy - 10, 16, 22, accent);
-        d.fillRect(w / 2 + 10, icon_cy - 6, 8, 10, TFT_BLACK);
-        d.fillRect(w / 2 - 2, icon_cy - 4, 6, 3, accent);
-        d.fillRect(w / 2 + 1, icon_cy - 1, 6, 3, accent);
-        d.fillRect(w / 2 - 2, icon_cy + 4, 6, 3, accent);
       }
 
       d.setTextColor(accent, TFT_BLACK);
@@ -4500,7 +4810,7 @@ void drawScreen(bool popup_only = false) {
       d.setTextColor(TFT_WHITE, TFT_BLACK);
       drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
     } else if (menu_page == MenuPage::WebFiles) {
-      if (dumps_stage == DumpsStage::PortalQr) {
+      if (dumps_stage == DumpsStage::PortalQr || dumps_stage == DumpsStage::Preview) {
         drawDumpsPage(d, 0, 0, w, h, accent);
       } else {
         drawDumpsPage(d, 4, content_top + 2, w - 8, content_h - 4, accent);
@@ -4574,7 +4884,11 @@ void drawScreen(bool popup_only = false) {
                           accent);
       }
     } else if (menu_page == MenuPage::About) {
-      drawAboutPage(d, 4, content_top + 2, w - 8, content_h - 4, accent, about_page_idx);
+      if (about_page_idx == 1) {
+        drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
+      } else {
+        drawAboutPage(d, 4, content_top + 2, w - 8, content_h - 4, accent, about_page_idx);
+      }
     } else {
       String head = diagnose_ok ? "DIAG PASS" : "DIAG CHECK";
       d.setTextColor(accent, TFT_BLACK);
@@ -4732,14 +5046,7 @@ void drawScreen(bool popup_only = false) {
       d.fillRect(w / 2 - 2, 47, 4, 4, accent);
       d.fillRect(w / 2 - 2, 54, 4, 12, accent);
     } else if (menu_page == MenuPage::Reader) {
-      // Reader: scanner panel + inbound NFC waves
-      d.fillRect(w / 2 - 20, 48, 24, 20, accent);
-      d.fillRect(w / 2 - 16, 52, 16, 8, TFT_BLACK);
-      d.fillRect(w / 2 - 16, 62, 16, 3, accent);
-      d.fillRect(w / 2 + 8, 54, 3, 8, accent);
-      d.fillRect(w / 2 + 12, 50, 3, 16, accent);
-      d.fillRect(w / 2 + 16, 46, 3, 24, accent);
-      d.fillRect(w / 2 + 20, 50, 3, 16, accent);
+      drawHomeIconReader(d, w / 2, 57, accent);
     } else if (menu_page == MenuPage::ReadNDEF) {
       // NDEF: tag/document with folded corner + lines
       d.fillRect(w / 2 - 16, 38, 30, 36, accent);
@@ -4751,23 +5058,9 @@ void drawScreen(bool popup_only = false) {
       d.fillRect(w / 2 - 8, 62, 10, 3, accent);
       d.fillRect(w / 2 - 8, 68, 8, 3, accent);
     } else if (menu_page == MenuPage::WebFiles) {
-      d.drawRect(w / 2 - 20, 44, 40, 28, accent);
-      d.fillRect(w / 2 - 16, 48, 8, 8, accent);
-      d.fillRect(w / 2 - 4, 48, 8, 8, accent);
-      d.fillRect(w / 2 + 8, 48, 8, 8, accent);
-      d.fillRect(w / 2 - 6, 62, 12, 3, accent);
-      d.fillRect(w / 2 - 2, 65, 4, 5, accent);
-    } else {
-      // Emulator: source card + clone card + transfer arrows
-      d.fillRect(w / 2 - 22, 46, 16, 22, accent);
-      d.fillRect(w / 2 - 18, 50, 8, 10, TFT_BLACK);
-      d.fillRect(w / 2 + 6, 46, 16, 22, accent);
-      d.fillRect(w / 2 + 10, 50, 8, 10, TFT_BLACK);
-      d.fillRect(w / 2 - 2, 52, 6, 3, accent);
-      d.fillRect(w / 2 + 1, 55, 6, 3, accent);
-      d.fillRect(w / 2 - 2, 60, 6, 3, accent);
-      d.fillRect(w / 2 - 5, 57, 3, 3, accent);
-      d.fillRect(w / 2 + 7, 57, 3, 3, accent);
+      drawHomeIconDumps(d, w / 2, 57, accent);
+    } else if (menu_page == MenuPage::Emulator) {
+      drawHomeIconEmulator(d, w / 2, 57, accent);
     }
 
     d.setTextSize(2);
@@ -4961,13 +5254,17 @@ void drawScreen(bool popup_only = false) {
       }
     }
   } else if (menu_page == MenuPage::WebFiles) {
-    if (dumps_stage == DumpsStage::PortalQr) {
+    if (dumps_stage == DumpsStage::PortalQr || dumps_stage == DumpsStage::Preview) {
       drawDumpsPage(d, 0, 0, w, h, accent);
     } else {
       drawDumpsPage(d, 4, 26, w - 8, h - 30, accent);
     }
   } else if (menu_page == MenuPage::About) {
-    drawAboutPage(d, 4, 26, w - 8, h - 30, accent, about_page_idx);
+    if (about_page_idx == 1) {
+      drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
+    } else {
+      drawAboutPage(d, 4, 26, w - 8, h - 30, accent, about_page_idx);
+    }
   } else if (menu_page == MenuPage::Diagnose) {
     d.setFont(&fonts::Font2);
     d.setTextSize(1);
@@ -6849,8 +7146,27 @@ void loop() {
     }
 
     if (dumps_stage == DumpsStage::Preview) {
-      dumps_stage = DumpsStage::Browse;
-      drawScreen();
+      if (key_nav.key_b) {
+        dumps_preview_font_level = static_cast<uint8_t>((dumps_preview_font_level + 1u) & 0x03u);
+        drawScreen();
+      } else if (hold_dumps) {
+        dumps_stage = DumpsStage::Browse;
+        drawScreen();
+      } else if (clicked || key_nav.next || key_nav.confirm) {
+        const int view_w = M5.Display.width() - 4;
+        const int view_h = M5.Display.height() - 18;
+        int line_h = 10;
+        dumpsPreviewApplyFont(M5.Display, dumps_preview_font_level, line_h);
+        const size_t page_lines = dumpsPreviewPageLines(max(20, view_h), line_h);
+        const size_t total_lines = dumpsPreviewCountLines(dumps_preview_text);
+        if (total_lines <= page_lines) {
+          dumps_preview_offset = 0;
+        } else {
+          dumps_preview_offset += page_lines;
+          if (dumps_preview_offset >= total_lines) dumps_preview_offset = 0;
+        }
+        drawScreen();
+      }
     } else if (dumps_stage == DumpsStage::PortalQr) {
       if (nav_prev) {
         prepareDumpsQrPayload(!dumps_qr_wifi);
@@ -6888,11 +7204,20 @@ void loop() {
             }
           }
         } else if (dumps_menu_index == 1) {
+          if (emu_dump_count > 0 && dump_file_index < emu_dump_count) {
+            dumps_preview_text = buildDumpPreview(emu_dump_files[dump_file_index]);
+            dumps_preview_offset = 0;
+            dumps_stage = DumpsStage::Preview;
+            drawScreen();
+            delay(10);
+            return;
+          }
+        } else if (dumps_menu_index == 2) {
           if (!emu_ap_active) startEmuApPortal();
           prepareDumpsQrPayload(true);
           dumps_stage = DumpsStage::PortalQr;
           drawScreen();
-        } else if (dumps_menu_index == 2) {
+        } else if (dumps_menu_index == 3) {
           goHome();
         }
       }
