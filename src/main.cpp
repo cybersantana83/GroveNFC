@@ -74,11 +74,7 @@ constexpr uint32_t kReaderAnimStepUs = 8000;
 constexpr uint32_t kReaderSweepUs = 820000;
 constexpr bool kAutoBootDebug = true;
 constexpr uint32_t kBootDebugShowMs = 2500;
-#if defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_STICKS3) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
 constexpr uint8_t kSpeakerVolume = 160;
-#else
-constexpr uint8_t kSpeakerVolume = 160;
-#endif
 constexpr uint8_t kEmuActionCount = 2;
 constexpr uint8_t kEmuDumpMaxFiles = 32;
 constexpr size_t kEmuDumpMaxBytes = 4096;
@@ -171,7 +167,6 @@ uint8_t emu_type_cursor = 0;
 uint8_t emu_type_scroll = 0;
 grove_nfc::CardInfo last_card;
 uint32_t last_poll_ms = 0;
-uint32_t last_reader_anim_gate_ms = 0;
 bool nfc_ready = false;
 bool emu_started = false;
 uint32_t emu_last_start_retry_ms = 0;
@@ -218,6 +213,20 @@ EmuType emu_type_anim_from = EmuType::N213;
 EmuType emu_type_anim_to = EmuType::N213;
 uint32_t last_emu_anim_ms = 0;
 bool emu_switch_apply_pending = false;
+
+// Home page carousel animation (same style as Emulator type carousel)
+bool home_anim_active = false;
+uint32_t home_anim_start_ms = 0;
+uint16_t home_anim_duration_ms = 240;
+int8_t home_anim_dir = 1;
+MenuPage home_anim_from = MenuPage::Reader;
+MenuPage home_anim_to = MenuPage::Reader;
+
+// Arrow flash: indicates which button was pressed on the home screen
+bool home_arrow_flash_right = false;  // flashes when A (next) pressed
+bool home_arrow_flash_left = false;   // flashes when B/prev pressed
+uint32_t home_arrow_flash_until_ms = 0;
+constexpr uint32_t kHomeArrowFlashMs = 90;
 bool emu_ap_active = false;
 WebServer emu_ap_server(80);
 DNSServer emu_ap_dns;
@@ -373,6 +382,7 @@ KeyNavState readKeyNavState() {
     }
   }
 
+ 
   if (has_b) {
     if (b_pressed_since_ms == 0) {
       b_pressed_since_ms = millis();
@@ -552,6 +562,62 @@ inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
 inline int  homePageCount() { return isNfcUnitMode() ? static_cast<int>(sizeof(kHomeOrderNfcUnit) / sizeof(kHomeOrderNfcUnit[0])) : static_cast<int>(sizeof(kHomeOrder) / sizeof(kHomeOrder[0])); }
 inline MenuPage homePageAt(int i) { return isNfcUnitMode() ? kHomeOrderNfcUnit[i] : kHomeOrder[i]; }
 
+MenuPage homePageWithOffset(int offset) {
+  const int count = homePageCount();
+  if (count == 0) return MenuPage::Reader;
+  const int raw = (home_index + offset) % count;
+  const int idx = raw < 0 ? raw + count : raw;
+  return homePageAt(idx);
+}
+
+const char* homePageName(MenuPage page) {
+  switch (page) {
+    case MenuPage::Reader:   return "Reader";
+    case MenuPage::ReadNDEF: return "Read NDEF";
+    case MenuPage::Emulator: return "Emulator";
+    case MenuPage::WebFiles: return "Dumps";
+    case MenuPage::Piano:    return "Piano";
+    case MenuPage::About:    return "About";
+    case MenuPage::Diagnose: return "Diagnose";
+    default:                 return "";
+  }
+}
+
+// Forward declarations for home icon drawers (defined later in drawScreen section)
+void drawHomeIconReader(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent);
+void drawHomeIconEmulator(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent);
+void drawHomeIconDumps(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent);
+
+void drawHomeIconForPage(lgfx::v1::LGFXBase& d, int cx, int cy, MenuPage page, uint16_t accent) {
+  if (page == MenuPage::About) {
+    d.drawCircle(cx, cy, 16, accent);
+    d.drawCircle(cx, cy, 15, accent);
+    d.fillRect(cx - 2, cy - 8, 4, 4, accent);
+    d.fillRect(cx - 2, cy - 1, 4, 11, accent);
+  } else if (page == MenuPage::Reader) {
+    drawHomeIconReader(d, cx, cy, accent);
+  } else if (page == MenuPage::ReadNDEF) {
+    d.fillRect(cx - 16, cy - 18, 30, 34, accent);
+    d.fillRect(cx - 12, cy - 14, 22, 26, TFT_BLACK);
+    d.fillRect(cx + 8, cy - 18, 6, 6, TFT_BLACK);
+    d.fillRect(cx + 4, cy - 14, 4, 2, accent);
+    d.fillRect(cx - 8, cy - 6, 14, 3, accent);
+    d.fillRect(cx - 8, cy, 14, 3, accent);
+    d.fillRect(cx - 8, cy + 6, 10, 3, accent);
+  } else if (page == MenuPage::WebFiles) {
+    drawHomeIconDumps(d, cx, cy, accent);
+  } else if (page == MenuPage::Emulator) {
+    drawHomeIconEmulator(d, cx, cy, accent);
+  } else if (page == MenuPage::Piano) {
+    d.fillRect(cx - 18, cy - 18, 36, 30, accent);
+    d.fillRect(cx - 14, cy - 14, 28, 22, TFT_BLACK);
+    d.fillRect(cx - 10, cy - 10, 3, 18, accent);
+    d.fillRect(cx - 4, cy - 10, 3, 18, accent);
+    d.fillRect(cx + 2, cy - 10, 3, 18, accent);
+    d.fillRect(cx + 8, cy - 10, 3, 18, accent);
+  }
+}
+
 const char* pageName(MenuPage page) {
   switch (page) {
     case MenuPage::Reader:
@@ -690,32 +756,6 @@ uint8_t pianoMappedCount();
 int8_t findPianoNoteByCard(const String& card_key);
 String buildPianoCardKey(const grove_nfc::CardInfo& card);
 void drawPianoPlayPartial();
-
-int menuIndex(MenuPage page) {
-  return static_cast<int>(page);
-}
-
-const char* protocolShort(const String& protocol) {
-  if (protocol == "ISO14443A") return "14A";
-  if (protocol == "ISO14443B") return "14B";
-  if (protocol == "ISO15693") return "15";
-  if (protocol == "FeliCa") return "FLC";
-  if (protocol == "MFC1K") return "1K";
-  if (protocol == "MFC4K") return "4K";
-  if (protocol == "MFCMini") return "Mini";
-  if (protocol.startsWith("MFP")) return "MF+";
-  if (protocol == "NTAG213") return "N213";
-  if (protocol == "NTAG215") return "N215";
-  if (protocol == "NTAG216") return "N216";
-  if (protocol == "NTAG203") return "N203";
-  if (protocol == "NTAG") return "NTAG";
-  if (protocol == "MFUL11") return "UL11";
-  if (protocol == "MFUL21") return "UL21";
-  if (protocol == "MFUL-C") return "UL-C";
-  if (protocol == "MFUL") return "UL";
-  if (protocol == "DESFire") return "DSF";
-  return "---";
-}
 
 const char* protocolFull(const String& protocol) {
   if (protocol == "ISO14443A") return "ISO14443A";
@@ -1591,20 +1631,6 @@ void showDumpsEmuPopup(const String& uid, const String& type_name) {
   dumps_emu_popup_until_ms = millis() + kDumpEmuPopupMs;
 }
 
-bool deleteDumpFileAt(uint8_t index) {
-  if (index >= emu_dump_count) return false;
-  const String path = emu_dump_files[index];
-  if (!LittleFS.exists(path)) return false;
-  const bool ok = LittleFS.remove(path);
-  if (ok) {
-    emu_dump_status = "Deleted " + shortDumpName(path, 14);
-  } else {
-    emu_dump_status = "Delete failed";
-  }
-  refreshDumpFiles(dumps_pick_for_emu);
-  return ok;
-}
-
 void scanDumpDir(const String& dir, uint8_t depth = 0) {
   if (!littlefs_ready || depth > 4 || emu_dump_count >= kEmuDumpMaxFiles) return;
 
@@ -2259,197 +2285,6 @@ bool saveDumpRawJson(const String& path, String content, String name, String& st
   if (!wrote) return false;
   normalizeDumpFileInPlace(path, status_text, "auto");
   return true;
-}
-
-void fillMfcExampleBlock(size_t block_index, bool is_4k, uint8_t* out16) {
-  memset(out16, 0, 16);
-  const uint8_t uid[4] = {0x11, 0x22, 0x33, 0x44};
-  if (block_index == 0) {
-    out16[0] = uid[0];
-    out16[1] = uid[1];
-    out16[2] = uid[2];
-    out16[3] = uid[3];
-    out16[4] = static_cast<uint8_t>(uid[0] ^ uid[1] ^ uid[2] ^ uid[3]);
-    out16[5] = 0x08;
-    out16[6] = 0x04;
-    out16[7] = 0x00;
-    out16[8] = 0x62;
-    out16[9] = 0x63;
-    out16[10] = 0x64;
-    out16[11] = 0x65;
-    out16[12] = 0x66;
-    out16[13] = 0x67;
-    out16[14] = 0x68;
-    out16[15] = 0x69;
-    return;
-  }
-
-  bool trailer = false;
-  if (!is_4k) {
-    trailer = (block_index % 4u) == 3u;
-  } else if (block_index < 128u) {
-    trailer = (block_index % 4u) == 3u;
-  } else {
-    trailer = ((block_index - 128u) % 16u) == 15u;
-  }
-
-  if (trailer) {
-    static const uint8_t kDefaultTrailer[16] = {
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0x07, 0x80, 0x69,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    memcpy(out16, kDefaultTrailer, sizeof(kDefaultTrailer));
-    return;
-  }
-}
-
-bool writePm3MfcExample(const String& path, bool is_4k) {
-  if (!littlefs_ready) return false;
-  File f = LittleFS.open(path, "w");
-  if (!f) return false;
-
-  const size_t block_count = is_4k ? 256u : 64u;
-  const String file_type = is_4k ? "mfc v3" : "mfc v2";
-  if (!writePm3JsonHeader(f, file_type, "11223344", "0400", "08")) {
-    f.close();
-    return false;
-  }
-
-  uint8_t block[16] = {0};
-  for (size_t i = 0; i < block_count; ++i) {
-    fillMfcExampleBlock(i, is_4k, block);
-    if (!writePm3BlockLine(f, i, block, sizeof(block), i + 1 < block_count)) {
-      f.close();
-      return false;
-    }
-  }
-
-  const bool ok = writePm3JsonFooter(f);
-  f.close();
-  return ok;
-}
-
-void fillNtagExamplePage(size_t page, const uint8_t uid[7], uint8_t cc_size, uint8_t* out4) {
-  memset(out4, 0, 4);
-  const uint8_t bcc0 = static_cast<uint8_t>(0x88 ^ uid[0] ^ uid[1] ^ uid[2]);
-  const uint8_t bcc1 = static_cast<uint8_t>(uid[3] ^ uid[4] ^ uid[5] ^ uid[6]);
-
-  if (page == 0) {
-    out4[0] = uid[0];
-    out4[1] = uid[1];
-    out4[2] = uid[2];
-    out4[3] = bcc0;
-  } else if (page == 1) {
-    out4[0] = uid[3];
-    out4[1] = uid[4];
-    out4[2] = uid[5];
-    out4[3] = uid[6];
-  } else if (page == 2) {
-    out4[0] = bcc1;
-    out4[1] = 0x48;
-    out4[2] = 0x00;
-    out4[3] = 0x00;
-  } else if (page == 3) {
-    out4[0] = 0xE1;
-    out4[1] = 0x10;
-    out4[2] = cc_size;
-    out4[3] = 0x00;
-  } else if (page == 4) {
-    out4[0] = 0x01;
-    out4[1] = 0x03;
-    out4[2] = 0xA0;
-    out4[3] = 0x0C;
-  } else if (page == 5) {
-    out4[0] = 0x34;
-    out4[1] = 0x03;
-    out4[2] = 0x10;
-    out4[3] = 0xD1;
-  } else if (page == 6) {
-    out4[0] = 0x01;
-    out4[1] = 0x0C;
-    out4[2] = 0x55;
-    out4[3] = 0x04;
-  } else if (page == 7) {
-    out4[0] = 0x6D;
-    out4[1] = 0x35;
-    out4[2] = 0x73;
-    out4[3] = 0x74;
-  } else if (page == 8) {
-    out4[0] = 0x61;
-    out4[1] = 0x63;
-    out4[2] = 0x6B;
-    out4[3] = 0x2E;
-  } else if (page == 9) {
-    out4[0] = 0x63;
-    out4[1] = 0x6F;
-    out4[2] = 0x6D;
-    out4[3] = 0xFE;
-  } else if ((cc_size == 0x12 && page == 40) || (cc_size == 0x3E && page == 130) || (cc_size == 0x6D && page == 226)) {
-    out4[0] = 0x00;
-    out4[1] = 0x00;
-    out4[2] = 0x00;
-    out4[3] = 0xBD;
-  } else if ((cc_size == 0x12 && page == 41) || (cc_size == 0x3E && page == 131) || (cc_size == 0x6D && page == 227)) {
-    out4[0] = 0x04;
-    out4[1] = 0x00;
-    out4[2] = 0x00;
-    out4[3] = 0xFF;
-  } else if ((cc_size == 0x12 && page == 42) || (cc_size == 0x3E && page == 132) || (cc_size == 0x6D && page == 228)) {
-    out4[0] = 0x00;
-    out4[1] = 0x05;
-    out4[2] = 0x00;
-    out4[3] = 0x00;
-  }
-}
-
-bool writePm3NtagExample(const String& path, size_t page_count, const uint8_t uid[7], uint8_t cc_size) {
-  if (!littlefs_ready) return false;
-  File f = LittleFS.open(path, "w");
-  if (!f) return false;
-
-  if (!writePm3JsonHeader(f, "mfu", bytesToHexUpper(uid, 7), "0044", "00")) {
-    f.close();
-    return false;
-  }
-
-  uint8_t page[4] = {0};
-  for (size_t i = 0; i < page_count; ++i) {
-    fillNtagExamplePage(i, uid, cc_size, page);
-    if (!writePm3BlockLine(f, i, page, sizeof(page), i + 1 < page_count)) {
-      f.close();
-      return false;
-    }
-  }
-
-  const bool ok = writePm3JsonFooter(f);
-  f.close();
-  return ok;
-}
-
-bool writePm3Linear4BExample(const String& path, const String& file_type, const String& uid, size_t block_count, uint8_t seed) {
-  if (!littlefs_ready) return false;
-  File f = LittleFS.open(path, "w");
-  if (!f) return false;
-
-  if (!writePm3JsonHeader(f, file_type, uid, "", "")) {
-    f.close();
-    return false;
-  }
-
-  uint8_t block[4] = {0};
-  for (size_t i = 0; i < block_count; ++i) {
-    for (uint8_t j = 0; j < 4; ++j) {
-      block[j] = static_cast<uint8_t>(seed + static_cast<uint8_t>(i * 4u + j));
-    }
-    if (!writePm3BlockLine(f, i, block, sizeof(block), i + 1 < block_count)) {
-      f.close();
-      return false;
-    }
-  }
-
-  const bool ok = writePm3JsonFooter(f);
-  f.close();
-  return ok;
 }
 
 void removeLegacyExampleDumps() {
@@ -3513,8 +3348,6 @@ void prepareDumpsQrPayload(bool wifi_payload) {
   dumps_qr_payload = wifi_payload ? dumpsWifiQrPayload() : dumpsPortalUrl();
 }
 
-void drawPixelFrame(lgfx::v1::LGFXBase& d, int x, int y, int width, int height, uint16_t color);
-
 void drawDumpsPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t accent) {
   d.fillRect(x, y, w, h, TFT_BLACK);
   d.setFont(&fonts::Font0);
@@ -3771,21 +3604,6 @@ void drawDumpsPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
       d.setTextSize(1);
     }
   }
-}
-
-void drawPixelFrame(lgfx::v1::LGFXBase& d, int x, int y, int width, int height, uint16_t color) {
-  if (width < 8 || height < 8) return;
-  d.fillRect(x, y, width, height, TFT_BLACK);
-  d.drawRect(x, y, width, height, color);
-  d.drawRect(x + 1, y + 1, width - 2, height - 2, color);
-  d.fillRect(x, y, 3, 3, TFT_BLACK);
-  d.fillRect(x + width - 3, y, 3, 3, TFT_BLACK);
-  d.fillRect(x, y + height - 3, 3, 3, TFT_BLACK);
-  d.fillRect(x + width - 3, y + height - 3, 3, 3, TFT_BLACK);
-  d.fillRect(x + 2, y + 1, 2, 2, color);
-  d.fillRect(x + width - 4, y + 1, 2, 2, color);
-  d.fillRect(x + 2, y + height - 3, 2, 2, color);
-  d.fillRect(x + width - 4, y + height - 3, 2, 2, color);
 }
 
 void drawHomeIconReader(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
@@ -4487,6 +4305,30 @@ void drawEmuTypeCarousel(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint
   }
 }
 
+// ---------- Battery icon helper ----------
+static void drawBatteryIcon(lgfx::v1::LGFXBase& d, int x, int y, int icon_w, int icon_h, uint16_t border_color) {
+  const int32_t level = M5.Power.getBatteryLevel();
+  if (level < 0) return;  // no battery / PMU
+  const int body_w = icon_w - 3;
+  const int body_h = icon_h;
+  const int nub_w = 2;
+  const int nub_h = icon_h / 2;
+  uint16_t color;
+  if (level <= 10) {
+    color = TFT_RED;
+  } else if (level <= 20) {
+    color = TFT_YELLOW;
+  } else {
+    color = TFT_GREEN;
+  }
+  d.fillRect(x + body_w, y + (icon_h - nub_h) / 2, nub_w, nub_h, border_color);
+  d.drawRect(x, y, body_w, body_h, border_color);
+  const int fill = (level * (body_w - 2)) / 100;
+  if (fill > 0) {
+    d.fillRect(x + 1, y + 1, fill, body_h - 2, color);
+  }
+}
+ 
 void drawScreen(bool popup_only = false) {
   auto& d = g_canvas;  // draw to off-screen sprite; push to display at every exit
   if (!popup_only) {
@@ -4523,9 +4365,13 @@ void drawScreen(bool popup_only = false) {
         d.setCursor(2, 1);
         d.print("<");
       }
-      const int tw = d.textWidth(title);
-      d.setCursor((w - tw) / 2, 2);
-      d.print(title);
+     const int tw = d.textWidth(title);
+     d.setCursor((w - tw) / 2, 2);
+     d.print(title);
+      // Battery icon on Reader/Emulator pages
+      if (menu_page == MenuPage::Reader || menu_page == MenuPage::Emulator) {
+        drawBatteryIcon(d, w - 22, 4, 18, 10, accent);
+      }
     };
 
     auto drawMenuBox = [&](int box_x, int box_y, int box_w, int box_h) {
@@ -4604,64 +4450,132 @@ void drawScreen(bool popup_only = false) {
       d.setFont(&fonts::Font0);
       String brand_s3 = nfc_module_name;
       const int brand_w = d.textWidth(brand_s3);
-      d.setCursor((w - brand_w) / 2, 2);
+      d.setCursor((w - brand_w) / 2, 4);
       d.print(brand_s3);
 
       const int icon_cy = content_top + content_h / 2;
 
-      // chunky pixel arrows
-      d.fillRect(8, icon_cy - 2, 4, 4, accent);
-      d.fillRect(12, icon_cy - 6, 4, 12, accent);
-      d.fillRect(16, icon_cy - 10, 4, 20, accent);
+      const int icon_box_cx = w / 2;
+      const int icon_box_w = 60;
+      const int icon_box_h = 44;
+      const int icon_box_x = icon_box_cx - icon_box_w / 2;
+      const int icon_box_y = icon_cy - icon_box_h / 2;
 
-      d.fillRect(w - 12, icon_cy - 2, 4, 4, accent);
-      d.fillRect(w - 16, icon_cy - 6, 4, 12, accent);
-      d.fillRect(w - 20, icon_cy - 10, 4, 20, accent);
-
-      d.fillRect(w / 2 - 30, icon_cy - 22, 60, 44, TFT_BLACK);
-
-      if (menu_page == MenuPage::About) {
-        // Info "i": circle with dot and bar
-        d.drawCircle(w / 2, icon_cy, 16, accent);
-        d.drawCircle(w / 2, icon_cy, 15, accent);
-        d.fillRect(w / 2 - 2, icon_cy - 8, 4, 4, accent);
-        d.fillRect(w / 2 - 2, icon_cy - 1, 4, 11, accent);
-      } else if (menu_page == MenuPage::Reader) {
-        drawHomeIconReader(d, w / 2, icon_cy, accent);
-      } else if (menu_page == MenuPage::ReadNDEF) {
-        d.fillRect(w / 2 - 16, icon_cy - 18, 30, 34, accent);
-        d.fillRect(w / 2 - 12, icon_cy - 14, 22, 26, TFT_BLACK);
-        d.fillRect(w / 2 + 8, icon_cy - 18, 6, 6, TFT_BLACK);
-        d.fillRect(w / 2 + 4, icon_cy - 14, 4, 2, accent);
-        d.fillRect(w / 2 - 8, icon_cy - 6, 14, 3, accent);
-        d.fillRect(w / 2 - 8, icon_cy, 14, 3, accent);
-        d.fillRect(w / 2 - 8, icon_cy + 6, 10, 3, accent);
-      } else if (menu_page == MenuPage::WebFiles) {
-        drawHomeIconDumps(d, w / 2, icon_cy, accent);
-      } else if (menu_page == MenuPage::Emulator) {
-        drawHomeIconEmulator(d, w / 2, icon_cy, accent);
-      } else if (menu_page == MenuPage::Piano) {
-        d.fillRect(w / 2 - 18, icon_cy - 18, 36, 30, accent);
-        d.fillRect(w / 2 - 14, icon_cy - 14, 28, 22, TFT_BLACK);
-        d.fillRect(w / 2 - 10, icon_cy - 10, 3, 18, accent);
-        d.fillRect(w / 2 - 4, icon_cy - 10, 3, 18, accent);
-        d.fillRect(w / 2 + 2, icon_cy - 10, 3, 18, accent);
-        d.fillRect(w / 2 + 8, icon_cy - 10, 3, 18, accent);
+      // Arrows with flash feedback
+      auto drawArrow = [&](bool left, uint16_t col) {
+        if (left) {
+          d.fillRect(8, icon_cy - 2, 4, 4, col);
+          d.fillRect(12, icon_cy - 6, 4, 12, col);
+          d.fillRect(16, icon_cy - 10, 4, 20, col);
+        } else {
+          d.fillRect(w - 12, icon_cy - 2, 4, 4, col);
+          d.fillRect(w - 16, icon_cy - 6, 4, 12, col);
+          d.fillRect(w - 20, icon_cy - 10, 4, 20, col);
+        }
+      };
+      const uint32_t now_ms = millis();
+      drawArrow(true,  accent);
+      drawArrow(false, accent);
+      const bool flash_right_ok = home_arrow_flash_right && now_ms < home_arrow_flash_until_ms;
+      const bool flash_left_ok  = home_arrow_flash_left  && now_ms < home_arrow_flash_until_ms;
+      if (flash_right_ok) {
+        drawArrow(false, TFT_BLACK);  // hide right arrow
+      } else if (flash_left_ok) {
+        drawArrow(true,  TFT_BLACK);  // hide left arrow
+      } else {
+        home_arrow_flash_right = false;
+        home_arrow_flash_left = false;
       }
 
-      d.setTextColor(accent, TFT_BLACK);
-      String home_name;
-      if (menu_page == MenuPage::About) home_name = "About";
-      else if (menu_page == MenuPage::Reader) home_name = "Reader";
-      else if (menu_page == MenuPage::ReadNDEF) home_name = "Read NDEF";
-      else if (menu_page == MenuPage::WebFiles) home_name = "Dumps";
-      else if (menu_page == MenuPage::Piano) home_name = "Piano";
-      else home_name = "Emulator";
+      if (home_anim_active) {
+        const uint32_t now = millis();
+        const uint32_t elapsed = now - home_anim_start_ms;
+        float t = 1.0f;
+        if (elapsed < home_anim_duration_ms) {
+          t = static_cast<float>(elapsed) / static_cast<float>(home_anim_duration_ms);
+        } else {
+          home_anim_active = false;
+        }
+        const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+        const float travel = 1.0f - eased; // 1→0, how far from center
 
-      d.setTextSize(2);
-      const int hw = d.textWidth(home_name);
-      d.setCursor((w - hw) / 2, h - 20);
-      d.print(home_name);
+        // ---- Icon: slide + alpha fade ----
+        // Next (dir=1): from (current) slides LEFT out; to (new) slides in from RIGHT
+        // Prev (dir=-1): from slides RIGHT out; to slides in from LEFT
+        // Alpha curves differ: from fades out faster, to fades in with delay
+        // so they don't appear simultaneously at mid-animation.
+        const int travel_px = static_cast<int>(travel * icon_box_cx);
+        const int from_cx = icon_box_cx - static_cast<int>(eased * icon_box_cx) * home_anim_dir;
+        const int to_cx   = icon_box_cx + travel_px * home_anim_dir;
+
+        d.fillRect(0, icon_box_y, w, icon_box_h, TFT_BLACK);
+
+        // "From" icon: slides away, fades out (fast — gone by eased=0.5)
+        {
+          const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
+          if (a > 4) {
+            drawHomeIconForPage(d, from_cx, icon_cy, home_anim_from, scaleColor565(accent, a));
+          }
+        }
+
+        // "To" icon: slides in, fades in (early — starts at eased=0.10)
+        {
+          const float reveal = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
+          const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal * 255.0f)));
+          if (a > 4) {
+            drawHomeIconForPage(d, to_cx, icon_cy, home_anim_to, scaleColor565(accent, a));
+          }
+        }
+
+        // ---- Text: staggered slide + alpha fade ----
+        // Text slides same speed as icon but fades in much later,
+        // creating a "follow behind" feel without a position jump.
+        const float text_eased = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
+        const float text_travel = 1.0f - text_eased;
+
+        const int from_tx = icon_box_cx - static_cast<int>(eased * icon_box_cx) * home_anim_dir;
+        const int to_tx   = icon_box_cx + static_cast<int>(text_travel * icon_box_cx) * home_anim_dir;
+
+        const String name_from = String(homePageName(home_anim_from));
+        const String name_to = String(homePageName(home_anim_to));
+        d.setFont(&fonts::Font0);
+        d.setTextSize(2);
+        const int name_y = h - 20;
+
+        // "From" text: slide + fade — alpha sync with icon (use eased directly)
+        {
+          const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
+          if (a > 4) {
+            const int nw = d.textWidth(name_from);
+            d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
+            d.setCursor(from_tx - nw / 2, name_y);
+            d.print(name_from);
+          }
+        }
+
+        // "To" text: slide + fade — appears much slower
+        {
+          const float reveal_t = max(0.0f, min(1.0f, (text_eased - 0.55f) / 0.45f));
+          const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal_t * 255.0f)));
+          if (a > 4) {
+            const int nw = d.textWidth(name_to);
+            d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
+            d.setCursor(to_tx - nw / 2, name_y);
+            d.print(name_to);
+          }
+        }
+      } else {
+        // Static home page — no animation
+        d.fillRect(icon_box_x, icon_box_y, icon_box_w, icon_box_h, TFT_BLACK);
+        drawHomeIconForPage(d, icon_box_cx, icon_cy, menu_page, accent);
+
+        d.setTextColor(accent, TFT_BLACK);
+        const String& home_name = homePageName(menu_page);
+        d.setTextSize(2);
+        const int hw = d.textWidth(home_name);
+        d.setCursor((w - hw) / 2, h - 20);
+        d.print(home_name);
+      }
 
       if (!boot_notice_line.isEmpty()) {
         d.setTextSize(1);
@@ -5024,61 +4938,130 @@ void drawScreen(bool popup_only = false) {
     d.setTextSize(2);
     String brand = nfc_module_name;
     int brand_w = d.textWidth(brand);
-    d.setCursor((w - brand_w) / 2, 1);
+    d.setCursor((w - brand_w) / 2, 3);
     d.print(brand);
     d.fillRect(0, 19, w, 109, TFT_BLACK);
-    
-    // chunky pixel arrows (4x4 blocks)
-    d.fillRect(8, 66, 4, 4, accent);
-    d.fillRect(12, 62, 4, 12, accent);
-    d.fillRect(16, 58, 4, 20, accent);
 
-    d.fillRect(w - 12, 66, 4, 4, accent);
-    d.fillRect(w - 16, 62, 4, 12, accent);
-    d.fillRect(w - 20, 58, 4, 20, accent);
-
-    d.fillRect(w / 2 - 30, 29, 60, 56, TFT_BLACK);
-
-    if (menu_page == MenuPage::About) {
-      // Info "i": circle with dot and bar
-      d.drawCircle(w / 2, 57, 18, accent);
-      d.drawCircle(w / 2, 57, 17, accent);
-      d.fillRect(w / 2 - 2, 47, 4, 4, accent);
-      d.fillRect(w / 2 - 2, 54, 4, 12, accent);
-    } else if (menu_page == MenuPage::Reader) {
-      drawHomeIconReader(d, w / 2, 57, accent);
-    } else if (menu_page == MenuPage::ReadNDEF) {
-      // NDEF: tag/document with folded corner + lines
-      d.fillRect(w / 2 - 16, 38, 30, 36, accent);
-      d.fillRect(w / 2 - 12, 42, 22, 28, TFT_BLACK);
-      d.fillRect(w / 2 + 8, 38, 6, 6, TFT_BLACK);
-      d.fillRect(w / 2 + 4, 42, 4, 2, accent);
-      d.fillRect(w / 2 - 8, 50, 14, 3, accent);
-      d.fillRect(w / 2 - 8, 56, 14, 3, accent);
-      d.fillRect(w / 2 - 8, 62, 10, 3, accent);
-      d.fillRect(w / 2 - 8, 68, 8, 3, accent);
-    } else if (menu_page == MenuPage::WebFiles) {
-      drawHomeIconDumps(d, w / 2, 57, accent);
-    } else if (menu_page == MenuPage::Emulator) {
-      drawHomeIconEmulator(d, w / 2, 57, accent);
+    // Arrows with flash feedback
+    auto drawArrow = [&](bool left, uint16_t col) {
+      if (left) {
+        d.fillRect(8, 66, 4, 4, col);
+        d.fillRect(12, 62, 4, 12, col);
+        d.fillRect(16, 58, 4, 20, col);
+      } else {
+        d.fillRect(w - 12, 66, 4, 4, col);
+        d.fillRect(w - 16, 62, 4, 12, col);
+        d.fillRect(w - 20, 58, 4, 20, col);
+      }
+    };
+    drawArrow(true,  accent);
+    drawArrow(false, accent);
+    const uint32_t now_ms = millis();
+    const bool flash_right_ok = home_arrow_flash_right && now_ms < home_arrow_flash_until_ms;
+    const bool flash_left_ok  = home_arrow_flash_left  && now_ms < home_arrow_flash_until_ms;
+    if (flash_right_ok) {
+      drawArrow(false, TFT_BLACK);  // hide right arrow
+    } else if (flash_left_ok) {
+      drawArrow(true,  TFT_BLACK);  // hide left arrow
+    } else {
+      home_arrow_flash_right = false;
+      home_arrow_flash_left = false;
     }
 
-    d.setTextSize(2);
-    d.setFont(&fonts::Font0);
-    d.setTextColor(accent, TFT_BLACK);
-    String home_name;
-    if (menu_page == MenuPage::About) home_name = "About";
-    else if (menu_page == MenuPage::Reader) home_name = "Reader";
-    else if (menu_page == MenuPage::ReadNDEF) home_name = "NDEF";
-    else if (menu_page == MenuPage::WebFiles) home_name = "Dumps";
-    else if (menu_page == MenuPage::Piano) home_name = "Piano";
-    else home_name = "Emulator";
-    d.fillRect(0, 94, w, 22, TFT_BLACK);
-    d.setTextSize(2);
-    const int home_name_w = d.textWidth(home_name);
-    const int home_name_x = (w - home_name_w) / 2;
-    d.setCursor(home_name_x, 98);
-    d.print(home_name);
+    const int icon_cx = w / 2;
+    const int icon_cy = 57;
+    const int icon_box_w = 60;
+    const int icon_box_h = 56;
+    const int icon_box_x = icon_cx - icon_box_w / 2;
+    const int icon_box_y = 29;
+
+    if (home_anim_active) {
+      const uint32_t now = millis();
+      const uint32_t elapsed = now - home_anim_start_ms;
+      float t = 1.0f;
+      if (elapsed < home_anim_duration_ms) {
+        t = static_cast<float>(elapsed) / static_cast<float>(home_anim_duration_ms);
+      } else {
+        home_anim_active = false;
+      }
+      const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+      const float travel = 1.0f - eased;
+
+      d.fillRect(0, icon_box_y, w, icon_box_h, TFT_BLACK);
+
+      // ---- Icon: slide + alpha fade ----
+      const int travel_px = static_cast<int>(travel * icon_cx);
+      const int from_cx = icon_cx - static_cast<int>(eased * icon_cx) * home_anim_dir;
+      const int to_cx   = icon_cx + travel_px * home_anim_dir;
+
+      // "From" icon: slides away, fades out (fast)
+      {
+        const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
+        if (a > 4) {
+          drawHomeIconForPage(d, from_cx, icon_cy, home_anim_from, scaleColor565(accent, a));
+        }
+      }
+
+      // "To" icon: slides in, fades in (early — starts at eased=0.10)
+      {
+        const float reveal = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
+        const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal * 255.0f)));
+        if (a > 4) {
+          drawHomeIconForPage(d, to_cx, icon_cy, home_anim_to, scaleColor565(accent, a));
+        }
+      }
+
+      // ---- Text: staggered slide + alpha fade ----
+      // Text slides same speed as icon but fades in much later (alpha delay),
+      // so it appears "behind" without a position jump.
+      const float text_eased = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
+      const float text_travel = 1.0f - text_eased;
+
+      const int from_tx = icon_cx - static_cast<int>(eased * icon_cx) * home_anim_dir;
+      const int to_tx   = icon_cx + static_cast<int>(text_travel * icon_cx) * home_anim_dir;
+
+      const String name_from = String(homePageName(home_anim_from));
+      const String name_to = String(homePageName(home_anim_to));
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      d.fillRect(0, 94, w, 22, TFT_BLACK);
+
+      // "From" text: fast fade out — sync with icon (use eased)
+      {
+        const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
+        if (a > 4) {
+          const int nw = d.textWidth(name_from);
+          d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
+          d.setCursor(from_tx - nw / 2, 98);
+          d.print(name_from);
+        }
+      }
+      // "To" text: slow fade in — extra delay
+      {
+        const float reveal_t = max(0.0f, min(1.0f, (text_eased - 0.55f) / 0.45f));
+        const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal_t * 255.0f)));
+        if (a > 4) {
+          const int nw = d.textWidth(name_to);
+          d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
+          d.setCursor(to_tx - nw / 2, 98);
+          d.print(name_to);
+        }
+      }
+    } else {
+      d.fillRect(icon_box_x, icon_box_y, icon_box_w, icon_box_h, TFT_BLACK);
+      drawHomeIconForPage(d, icon_cx, icon_cy, menu_page, accent);
+
+      d.setTextSize(2);
+      d.setFont(&fonts::Font0);
+      d.setTextColor(accent, TFT_BLACK);
+      const String& home_name = homePageName(menu_page);
+      d.fillRect(0, 94, w, 22, TFT_BLACK);
+      d.setTextSize(2);
+      const int home_name_w = d.textWidth(home_name);
+      const int home_name_x = (w - home_name_w) / 2;
+      d.setCursor(home_name_x, 98);
+      d.print(home_name);
+    }
 
     if (!boot_notice_line.isEmpty()) {
       d.setTextSize(1);
@@ -5193,9 +5176,13 @@ void drawScreen(bool popup_only = false) {
   if (menu_page == MenuPage::WebFiles && emu_dump_count > 0 && !dumps_pick_for_emu) {
     const String counter = String(dump_file_index + 1) + "/" + String(emu_dump_count);
     d.setTextColor(accent, TFT_BLACK);
-    const int cw = d.textWidth(counter);
-    d.setCursor(w - cw - 2, 2);
-    d.print(counter);
+   const int cw = d.textWidth(counter);
+   d.setCursor(w - cw - 2, 2);
+   d.print(counter);
+  }
+  // Battery icon on Reader/Emulator pages
+  if (menu_page == MenuPage::Reader || menu_page == MenuPage::Emulator) {
+    drawBatteryIcon(d, w - 22, 6, 18, 10, accent);
   }
 
   d.setTextSize(2);
@@ -6130,22 +6117,10 @@ void handleReader() {
   if (got_card) {
     reader_fail_streak = 0;
     last_reader_success_ms = now;
-    bool first_tone_played = false;
-    if (reader_need_first_tone) {
-#if defined(APP_TARGET_STICKS3)
-      playCardTone(card.protocol);
-#else
-      playSuccessTone();
-#endif
-      reader_need_first_tone = false;
-      first_tone_played = true;
-      Serial.printf("[CARD][TONE] First detect -> %s\n", formatCardLogLine(card).c_str());
-    }
+    reader_need_first_tone = false;
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
-      if (!first_tone_played) {
-        playCardTone(card.protocol);
-      }
+
       drawScreen();
       Serial.println(formatCardLogLine(card));
       reader_last_hold_log_ms = now;
@@ -6586,22 +6561,10 @@ void processReaderResult() {
   if (got_card) {
     reader_fail_streak = 0;
     last_reader_success_ms = millis();
-    bool first_tone_played = false;
-    if (reader_need_first_tone) {
-#if defined(APP_TARGET_STICKS3)
-      playCardTone(card.protocol);
-#else
-      playSuccessTone();
-#endif
-      reader_need_first_tone = false;
-      first_tone_played = true;
-      Serial.printf("[CARD][TONE] First detect -> %s\n", formatCardLogLine(card).c_str());
-    }
+    reader_need_first_tone = false;
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
-      if (!first_tone_played) {
-        playCardTone(card.protocol);
-      }
+
       drawScreen();
       Serial.println(formatCardLogLine(card));
       reader_last_hold_log_ms = millis();
@@ -6781,9 +6744,12 @@ void processPianoResult() {
 }  // namespace
 
 void setup() {
-  auto cfg = M5.config();
+ auto cfg = M5.config();
 #if defined(APP_TARGET_STICKCPLUS)
   cfg.internal_spk = true;
+#endif
+#if defined(APP_TARGET_STICKS3)
+  cfg.internal_spk = false;
 #endif
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   M5Cardputer.begin(cfg, true);
@@ -6982,6 +6948,22 @@ void loop() {
     }
   }
 
+  if (in_home && home_anim_active) {
+    const uint32_t now = millis();
+    if (now - home_anim_start_ms >= home_anim_duration_ms) {
+      home_anim_active = false;
+    }
+    drawScreen();
+    delay(10);
+    return;
+  }
+
+  // Clear arrow flash when it expires
+  if ((home_arrow_flash_right || home_arrow_flash_left) && millis() >= home_arrow_flash_until_ms) {
+    home_arrow_flash_right = false;
+    home_arrow_flash_left = false;
+  }
+
   if (wifi_popup) {
     if (clicked || key_nav.cancel || nav_back) {
       wifi_popup = false;
@@ -7002,13 +6984,31 @@ void loop() {
 
   if (in_home) {
     if (nav_prev) {
-      home_index = (home_index + homePageCount() - 1) % homePageCount();
-      menu_page = homePageAt(home_index);
-      drawScreen();
+      home_arrow_flash_left = true;
+      home_arrow_flash_until_ms = millis() + kHomeArrowFlashMs;
+      const MenuPage to_page = homePageWithOffset(-1);
+      if (!home_anim_active || home_anim_to != to_page) {
+        home_anim_from = menu_page;
+        home_anim_to = to_page;
+        home_anim_dir = -1;
+        home_anim_start_ms = millis();
+        home_anim_active = true;
+        home_index = (home_index + homePageCount() - 1) % homePageCount();
+        menu_page = to_page;
+      }
     } else if (clicked || key_nav.next) {
-      home_index = (home_index + 1) % homePageCount();
-      menu_page = homePageAt(home_index);
-      drawScreen();
+      home_arrow_flash_right = true;
+      home_arrow_flash_until_ms = millis() + kHomeArrowFlashMs;
+      const MenuPage to_page = homePageWithOffset(1);
+      if (!home_anim_active || home_anim_to != to_page) {
+        home_anim_from = menu_page;
+        home_anim_to = to_page;
+        home_anim_dir = 1;
+        home_anim_start_ms = millis();
+        home_anim_active = true;
+        home_index = (home_index + 1) % homePageCount();
+        menu_page = to_page;
+      }
     }
     const bool hold_enter = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
     if (hold_enter || key_nav.confirm) {

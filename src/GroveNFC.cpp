@@ -828,17 +828,6 @@ uint8_t applyLowNibbleSlot(uint8_t value, uint8_t slot) {
   return static_cast<uint8_t>((value & 0xF0) | (((value & 0x0F) + (slot & 0x0F)) & 0x0F));
 }
 
-String bytesToHexCompact(const uint8_t* data, size_t len) {
-  static const char* kHex = "0123456789ABCDEF";
-  String out;
-  out.reserve(len * 2);
-  for (size_t i = 0; i < len; ++i) {
-    out += kHex[(data[i] >> 4) & 0x0F];
-    out += kHex[data[i] & 0x0F];
-  }
-  return out;
-}
-
 void updateNtagBcc(uint8_t* header, size_t len) {
   if (len < 9) return;
   // BCC0 = CT(0x88) XOR UID0 XOR UID1 XOR UID2
@@ -1945,7 +1934,12 @@ bool GroveNFC::readFelica(CardInfo& card) {
   if (has_pmm) {
     const uint8_t* pmm = &rx[10];
     const uint16_t ic_code = (uint16_t(pmm[0]) << 8) | uint16_t(pmm[1]);
-    detail += "\nPMm: 0x" + bytesToHexCompact(pmm, 8);
+    {
+      static const char* kHex = "0123456789ABCDEF";
+      String hex; hex.reserve(16);
+      for (size_t i_ = 0; i_ < 8; ++i_) { hex += kHex[(pmm[i_] >> 4) & 0x0F]; hex += kHex[pmm[i_] & 0x0F]; }
+      detail += "\nPMm: 0x" + hex;
+    }
     snprintf(line, sizeof(line), "\nIC code: 0x%04X", ic_code);
     detail += line;
     snprintf(line, sizeof(line), "\nROM type: 0x%02X", pmm[0]);
