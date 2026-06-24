@@ -513,13 +513,6 @@ void playSuccessTone() {
 }
 
 void playCardTone(const String& protocol) {
-#if defined(APP_TARGET_STICKS3)
-  static uint8_t s_scale_step = 0;
-  static constexpr uint16_t kScaleFreq[8] = {523, 587, 659, 698, 784, 880, 988, 1047};
-  playTone(kScaleFreq[s_scale_step], 90);
-  s_scale_step = static_cast<uint8_t>((s_scale_step + 1) % 8);
-  (void)protocol;
-#else
   if (protocol == "ISO14443A" || protocol.startsWith("MFC") || protocol.startsWith("MFP")
       || protocol.startsWith("NTAG") || protocol.startsWith("MFUL") || protocol == "DESFire") {
     playTone(1480, 70);
@@ -532,7 +525,6 @@ void playCardTone(const String& protocol) {
   } else {
     playTone(1047, 80);
   }
-#endif
 }
 
 void playNdefTone(bool is_wifi) {
@@ -545,6 +537,19 @@ void playNdefTone(bool is_wifi) {
     return;
   }
   playSuccessTone();
+}
+
+// ---------- Speaker GPIO 5V control (M5StickS3 PY32PMIC) ----------
+static void setSpeaker5V(bool enable) {
+#if defined(APP_TARGET_STICKS3)
+  if (enable) {
+    M5.In_I2C.bitOn(0x6E, 0x11, 0b00001000, 100000);
+  } else {
+    M5.In_I2C.bitOff(0x6E, 0x11, 0b00001000, 100000);
+  }
+#else
+  (void)enable;
+#endif
 }
 
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
@@ -650,11 +655,11 @@ const char* emuName(EmuType type) {
     case EmuType::N216:
       return "NTAG216";
     case EmuType::ISO14B:
-      return "ISO14443B";
+      return "ISO14B";
     case EmuType::Felica:
       return "Felica";
     case EmuType::ISO15:
-      return "ISO15693";
+      return "ISO15";
     default:
       return "Unknown";
   }
@@ -4181,12 +4186,9 @@ float easeOutCubic(float t) {
 }
 
 int fitEmuCenterTextSize(lgfx::v1::LGFXBase& d, const String& text, int desired, int max_w) {
-  for (int sz = desired; sz >= 1; --sz) {
-    d.setFont(&fonts::Font0);
-    d.setTextSize(sz);
-    if (d.textWidth(text) <= max_w) return sz;
-  }
-  return 1;
+  (void)text;
+  (void)max_w;
+  return min(desired, 2);
 }
 
 int drawEmuCenterLabel(lgfx::v1::LGFXBase& d,
@@ -4225,22 +4227,23 @@ void drawEmuBottomLine(lgfx::v1::LGFXBase& d,
   const int clip_w = max(8, w - pad * 2);
   const int line_h = d.fontHeight();
   const int text_w = d.textWidth(text);
-
+ 
   if (text_w <= clip_w) {
     d.setCursor(x + (w - text_w) / 2, y);
     d.print(text);
     return;
   }
-
-  const String loop_text = text + "   " + text;
-  const int gap_w = d.textWidth("   ");
-  const int cycle_w = text_w + gap_w;
-  const int offset = (millis() / 45) % max(1, cycle_w);
-
-  d.setClipRect(clip_x, y - 1, clip_w, line_h + 2);
-  d.setCursor(clip_x - offset, y);
-  d.print(loop_text);
-  d.clearClipRect();
+ 
+  // Split into 2 fixed lines
+  const size_t half = text.length() / 2;
+  const String line1 = text.substring(0, half);
+  const String line2 = text.substring(half);
+  const int w1 = d.textWidth(line1);
+  const int w2 = d.textWidth(line2);
+  d.setCursor(x + (w - w1) / 2, y);
+  d.print(line1);
+  d.setCursor(x + (w - w2) / 2, y + line_h + 1);
+  d.print(line2);
 }
 
 void drawEmuTypeCarousel(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t accent) {
@@ -4249,7 +4252,7 @@ void drawEmuTypeCarousel(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint
   const int center_x = x + w / 2;
   const int center_y = y + h / 2;
   const int label_center_y = center_y - 4;
-  const int avail_w = max(20, w - 22);
+  const int avail_w = max(20, w - 16);
 
   const String left_hint = String(emuName(emuTypeWithOffset(emu_type, -1)));
   const String right_hint = String(emuName(emuTypeWithOffset(emu_type, +1)));
@@ -4292,7 +4295,7 @@ void drawEmuTypeCarousel(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint
   (void)anchor_w;
 
   const int deco_y = label_center_y - 6;
-  const int edge_pad = 6;
+  const int edge_pad = 2;
   const int left_deco_x = x + edge_pad;
   const int right_deco_x = x + w - edge_pad - 12;
   if (left_deco_x >= x + 1 && right_deco_x + 12 <= x + w - 1) {
@@ -4736,7 +4739,7 @@ void drawScreen(bool popup_only = false) {
         const int ex = 4, ey = content_top + 2, ew = w - 8, eh = content_h - 4;
         d.setFont(&fonts::Font0);
         d.setTextSize(2);
-        const int uid_y = ey + eh - d.fontHeight() - 6;
+        const int uid_y = ey + eh - d.fontHeight() * 2 - 2;
         drawEmuTypeCarousel(d, ex, ey, ew, eh, accent);
         // ID line centred below — dynamic based on type support and emulation state
         String id_text;
@@ -4758,7 +4761,7 @@ void drawScreen(bool popup_only = false) {
         const int gex = 4, gey = content_top + 2, gew = w - 8, geh = content_h - 4;
         d.setFont(&fonts::Font0);
         d.setTextSize(2);
-        const int uid_y = gey + geh - d.fontHeight() - 6;
+        const int uid_y = gey + geh - d.fontHeight() * 2 - 2;
         drawEmuTypeCarousel(d, gex, gey, gew, geh, accent);
         // ID line centred below
         {
@@ -5207,7 +5210,7 @@ void drawScreen(bool popup_only = false) {
       // Clear the whole card area (overwriting the header title_line printed above).
       const int ex = 4, ey = 26, ew = w - 8, eh = h - 30;
       d.fillRect(ex, ey, ew, eh, TFT_BLACK);
-      const int uid_y = ey + eh - d.fontHeight() - 6;
+      const int uid_y = ey + eh - d.fontHeight() * 2 - 2;
       drawEmuTypeCarousel(d, ex, ey, ew, eh, accent);
       // ID line centred below – runtime colour based on emulation state
       {
@@ -5228,7 +5231,7 @@ void drawScreen(bool popup_only = false) {
     } else {
       // Grove mode: card-style with centred type + arrows + coloured ID.
       const int gex = 4, gey = 26, gew = w - 8, geh = h - 30;
-      const int uid_y = gey + geh - d.fontHeight() - 6;
+      const int uid_y = gey + geh - d.fontHeight() * 2 - 2;
       d.fillRect(gex, gey, gew, geh, TFT_BLACK);
       drawEmuTypeCarousel(d, gex, gey, gew, geh, accent);
       // ID line centred below
@@ -5600,6 +5603,7 @@ void goHome() {
   dumps_stage = DumpsStage::Browse;
   dumps_pick_for_emu = false;
   menu_page = homePageAt(home_index);
+  setSpeaker5V(false);
   drawScreen();
 }
 
@@ -5618,6 +5622,10 @@ void enterCurrentFeature() {
     reader_last_hold_log_ms = 0;
     reader_fail_streak = 0;
     reader_need_first_tone = true;
+    playTone(880, 200);
+    delay(250);
+    setSpeaker5V(true);
+    reader_need_first_tone = false;
     last_poll_ms = 0;
   } else if (menu_page == MenuPage::ReadNDEF) {
     ndef_text = "";
@@ -5836,115 +5844,47 @@ void runBootDebugFlow() {
   d.fillScreen(TFT_BLACK);
   d.setFont(&fonts::Font2);
   d.setTextSize(1);
+  const int line_h = d.fontHeight() + 2;
+  int row = 0;
+  int y;
 
-  constexpr int kBootStoreLines = 16;
-  const int kBootTop = 2;
-  const int display_h = static_cast<int>(d.height());
-  const int kBootLineH = d.fontHeight() + 2;
-  const int kBootVisibleLinesRaw = (display_h - kBootTop - 2) / kBootLineH;
-  const int kBootVisibleLines = (kBootVisibleLinesRaw < 3) ? 3 : kBootVisibleLinesRaw;
-  String boot_lines[kBootStoreLines];
-  uint16_t boot_colors[kBootStoreLines];
-  int boot_count = 0;
-
-  auto renderBootLog = [&]() {
-    d.fillScreen(TFT_BLACK);
-    const int start = max(0, boot_count - kBootVisibleLines);
-    for (int i = start; i < boot_count; ++i) {
-      const int row = i - start;
-      d.setTextColor(boot_colors[i], TFT_BLACK);
-      d.setCursor(2, kBootTop + row * kBootLineH);
-      d.print(boot_lines[i]);
-    }
-  };
-
-  auto pushBootLog = [&](const String& line, uint16_t color, uint16_t wait_ms) {
-    if (boot_count >= kBootStoreLines) {
-      for (int i = 1; i < kBootStoreLines; ++i) {
-        boot_lines[i - 1] = boot_lines[i];
-        boot_colors[i - 1] = boot_colors[i];
-      }
-      boot_count = kBootStoreLines - 1;
-    }
-    boot_lines[boot_count] = line;
-    boot_colors[boot_count] = color;
-    ++boot_count;
-    renderBootLog();
+  auto drawLine = [&](const String& text, uint16_t color, uint16_t wait_ms) {
+    y = 2 + row * line_h;
+    d.setTextColor(color, TFT_BLACK);
+    d.setCursor(2, y);
+    d.print(text);
     delay(wait_ms);
+    row++;
   };
 
-  pushBootLog(String("[BOOT] ") + nfc_module_name + " init", TFT_GREEN, 120);
-  pushBootLog(String("[BOOT] I2C @400k addr=0x") + String(nfc.activeAddress(), HEX), TFT_GREEN, 90);
-
-  Serial.println("[BOOT] Auto debug start");
+  drawLine(String("[BOOT] ") + nfc_module_name, TFT_GREEN, 150);
   if (!nfc_ready) {
-    diagnose_ok = false;
-    diagnose_report = "I2C/NFC not ready";
-    boot_notice_line = "DIAG FAIL: NFC NOT READY";
-    Serial.println("[BOOT] NFC not ready");
-    pushBootLog("NFC not ready [FAIL]", TFT_RED, 220);
-    pushBootLog("[BOOT] Enter menu", TFT_YELLOW, 1000);
+    drawLine("[FAIL] NFC not ready", TFT_RED, 1500);
+    boot_notice_line = "NFC FAIL";
     boot_debug_running = false;
     goHome();
     return;
   }
 
-  pushBootLog("NFC online [OK]", TFT_GREEN, 100);
-  String hw_line = "[BOOT] HW=0x" + String(hw_ver, HEX);
-  hw_line.toUpperCase();
-  pushBootLog(hw_line, TFT_WHITE, 90);
-  String fw_line = "[BOOT] FW=0x" + String(fw_ver, HEX);
-  fw_line.toUpperCase();
-  pushBootLog(fw_line, TFT_WHITE, 90);
+  drawLine("[OK] NFC online", TFT_GREEN, 120);
+  {
+    String v = "[VER] HW=0x" + String(hw_ver, HEX) + " FW=0x" + String(fw_ver, HEX);
+    v.toUpperCase();
+    drawLine(v, TFT_WHITE, 120);
+  }
 
   diagnose_ok = nfc.selfCheck(diagnose_report);
   diagnose_report = normalizeReportNewlines(diagnose_report);
   hw_ver = nfc.hardwareVersion();
   fw_ver = nfc.firmwareVersion();
   Serial.printf("[BOOT] DIAG: %s\n%s\n", diagnose_ok ? "PASS" : "FAIL", diagnose_report.c_str());
+  drawLine(diagnose_ok ? "[OK] Self-check pass" : "[FAIL] Self-check fail",
+           diagnose_ok ? TFT_GREEN : TFT_RED, 180);
 
-  pushBootLog(diagnose_ok ? "Self-check pass [OK]" : "Self-check fail [FAIL]",
-              diagnose_ok ? TFT_GREEN : TFT_RED,
-              170);
-
-  size_t diag_pos = 0;
-  while (diag_pos < diagnose_report.length()) {
-    int end = diagnose_report.indexOf('\n', diag_pos);
-    if (end < 0) end = diagnose_report.length();
-    String item = diagnose_report.substring(diag_pos, end);
-    item.trim();
-    if (!item.isEmpty()) {
-      pushBootLog(String(" - ") + item, TFT_WHITE, 70);
-    }
-    diag_pos = static_cast<size_t>(end) + 1;
-  }
-
-  CardInfo boot_card;
-  if (nfc.readAny(boot_card)) {
-    Serial.printf("[BOOT] CARD: %s UID=%s\n", boot_card.protocol.c_str(), boot_card.uid.c_str());
-    last_card = boot_card;
-    pushBootLog("[BOOT] CARD " + boot_card.protocol, TFT_GREEN, 100);
-  } else {
-    Serial.println("[BOOT] CARD: none");
-    pushBootLog("[BOOT] CARD none", TFT_WHITE, 80);
-  }
-
-  String boot_ndef;
-  String boot_ndef_detail;
-  if (nfc.readNdef(boot_ndef, boot_ndef_detail)) {
-    Serial.printf("[BOOT] NDEF: %s\n", boot_ndef.c_str());
-    ndef_text = boot_ndef;
-    ndef_detail = boot_ndef_detail;
-    pushBootLog("[BOOT] NDEF found", TFT_GREEN, 100);
-  } else {
-    Serial.printf("[BOOT] NDEF: %s\n", boot_ndef_detail.c_str());
-    pushBootLog("[BOOT] NDEF none", TFT_WHITE, 80);
-  }
+  drawLine("[BOOT] Ready", TFT_YELLOW, 1000);
 
   diagnose_report = diagnose_ok ? "Boot check done" : "Boot check fail";
-  boot_notice_line = diagnose_ok ? "" : "DIAG FAIL: HOLD CHECK";
-  pushBootLog("[BOOT] Enter menu", TFT_YELLOW, 1000);
-
+  boot_notice_line = diagnose_ok ? "" : "DIAG FAIL";
   boot_debug_running = false;
   goHome();
   Serial.println("[BOOT] Auto debug done");
@@ -6117,10 +6057,9 @@ void handleReader() {
   if (got_card) {
     reader_fail_streak = 0;
     last_reader_success_ms = now;
-    reader_need_first_tone = false;
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
-
+      playCardTone(card.protocol);
       drawScreen();
       Serial.println(formatCardLogLine(card));
       reader_last_hold_log_ms = now;
@@ -6281,6 +6220,13 @@ void nfcWorkerTask(void* /*param*/) {
             };
 
             if (nfc_ready) {
+              // Stop RF first so external reader re-detects with new protocol
+              if (isNfcUnitMode()) {
+                nfc.stopNfcUnitEmulation();
+              } else {
+                nfc.stopRF();
+              }
+              delay(50);
               EmuType et = static_cast<EmuType>(nfc_w_emu_type);
               bool ok = startForType(et);
               if (!ok) {
@@ -6561,10 +6507,9 @@ void processReaderResult() {
   if (got_card) {
     reader_fail_streak = 0;
     last_reader_success_ms = millis();
-    reader_need_first_tone = false;
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
-
+      playCardTone(card.protocol);
       drawScreen();
       Serial.println(formatCardLogLine(card));
       reader_last_hold_log_ms = millis();
@@ -6749,7 +6694,7 @@ void setup() {
   cfg.internal_spk = true;
 #endif
 #if defined(APP_TARGET_STICKS3)
-  cfg.internal_spk = false;
+  cfg.internal_spk = true;
 #endif
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   M5Cardputer.begin(cfg, true);
@@ -6945,6 +6890,13 @@ void loop() {
     } else if (emu_switch_apply_pending) {
       emu_switch_apply_pending = false;
       startCurrentEmulation();
+    } else {
+      // Periodic redraw for UID marquee scrolling
+      const uint32_t now = millis();
+      if (now - last_ui_scroll_ms >= kUiScrollMs) {
+        last_ui_scroll_ms = now;
+        drawScreen();
+      }
     }
   }
 
@@ -7267,6 +7219,7 @@ void loop() {
         piano_active_note_idx = -1;
         piano_last_sustain_ms = 0;
         if (piano_menu_index == 0) {
+          setSpeaker5V(true);
           piano_stage = PianoStage::Play;
           piano_last_note = "-";
           piano_status = "Tap card to play";
@@ -7298,6 +7251,7 @@ void loop() {
           ignore_click_after_hold = true;
         }
         piano_stage = PianoStage::Menu;
+        setSpeaker5V(false);
         piano_menu_index = 0;
         piano_active_card_key = "";
         piano_active_note_idx = -1;
