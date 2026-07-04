@@ -74,7 +74,7 @@ static void mirror_ntag213_wrap_pages(uint8_t* mem, size_t len) {
   memcpy(mem + 180, mem, 12);
 }
 
-// Fixed UID used for NFC Unit fallback templates.
+// Fixed UID used for Unit NFC fallback templates.
 static const uint8_t kEmuUID[7] = {0x04, 0x15, 0x91, 0xAA, 0x61, 0x93, 0x1C};
 
 // MIFARE Ultralight memory (64 bytes = 16 pages × 4 bytes)
@@ -901,7 +901,7 @@ bool GroveNFC::detectAddress() {
 }
 
 const char* GroveNFC::deviceName() const {
-  return is_nfc_unit_ ? "NFC Unit" : "GroveNFC";
+  return is_nfc_unit_ ? "M5 Unit NFC" : "GroveNFC";
 }
 
 bool GroveNFC::beginNfcUnitBackend() {
@@ -923,7 +923,7 @@ bool GroveNFC::readAnyNfcUnit(CardInfo& card) {
     card.valid = false;
     card.protocol = "None";
     card.uid = "";
-    card.detail = "NFC Unit backend not started";
+    card.detail = "Unit NFC backend not started";
     return false;
   }
 
@@ -1196,13 +1196,14 @@ bool GroveNFC::uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t
 bool GroveNFC::startEmulationMifare1K() {
   if (is_nfc_unit_) {
 #if GROVENFC_HAS_M5UNIT_BACKEND
-    // NFC Unit backend does not support true MF1K card emulation.
     return false;
 #else
     return false;
 #endif
   }
-  if (!custom_dump_mifare1k_) writeMifare1KImage();
+  if (!custom_dump_mifare1k_) {
+    if (!writeMifare1KImage()) return false;
+  }
   stopRF();
   writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
   delay(5);
@@ -1324,7 +1325,7 @@ bool GroveNFC::readOnlyISO14B(CardInfo& card) {
       card.valid = false;
       card.protocol = "None";
       card.uid = "";
-      card.detail = "NFC Unit backend not started";
+      card.detail = "Unit NFC backend not started";
       return false;
     }
     // Switch to B mode, scan with full ATTRIB + GET UID, switch back
@@ -1361,7 +1362,7 @@ bool GroveNFC::readOnlyISO14B(CardInfo& card) {
 bool GroveNFC::readNdef(String& ndef_text, String& detail) {
   if (is_nfc_unit_) {
     ndef_text = "";
-    detail = "NFC Unit: NDEF path pending";
+    detail = "Unit NFC: NDEF path pending";
     return false;
   }
 
@@ -2127,7 +2128,7 @@ void GroveNFC::writeNtag216Image() {
   delay(250);
 }
 
-void GroveNFC::writeMifare1KImage() {
+bool GroveNFC::writeMifare1KImage() {
   uint8_t header[sizeof(kMifareOne4B1KHeader)] = {0};
   memcpy(header, kMifareOne4B1KHeader, sizeof(header));
   header[3] = applyLowNibbleSlot(header[3], slot_index_);
@@ -2137,14 +2138,24 @@ void GroveNFC::writeMifare1KImage() {
   delay(2);
   writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k);
   delay(2);
-  writeData(I2cEpromReg_Addr, header, sizeof(header));
-  delay(2);
-  for (uint16_t sector = 1; sector < 16; ++sector) {
-    writeData(I2cEpromReg_Addr + (sector << 6), kMifareOne1KData, sizeof(kMifareOne1KData));
+
+  constexpr size_t kChunk = 32;
+  for (size_t off = 0; off < sizeof(header); off += kChunk) {
+    const size_t n = min(kChunk, sizeof(header) - off);
+    if (!writeData(I2cEpromReg_Addr + off, header + off, n)) return false;
     delay(2);
   }
-  writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE);
+  for (uint16_t sector = 1; sector < 16; ++sector) {
+    const uint16_t base = I2cEpromReg_Addr + (sector << 6);
+    for (size_t off = 0; off < sizeof(kMifareOne1KData); off += kChunk) {
+      const size_t n = min(kChunk, sizeof(kMifareOne1KData) - off);
+      if (!writeData(base + off, kMifareOne1KData + off, n)) return false;
+      delay(2);
+    }
+  }
+  if (!writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE)) return false;
   delay(500);
+  return true;
 }
 
 void GroveNFC::writeISO15Image() {

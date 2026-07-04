@@ -8,3 +8,4 @@ intro/
 deps/
 modules/
 build_zephyr_sticks3/
+output/

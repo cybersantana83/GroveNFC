@@ -554,9 +554,9 @@ static void setSpeaker5V(bool enable) {
 
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
 const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano};
-// Keep the same accent palette for both GroveNFC and NFC Unit to avoid UI mismatch.
+// Keep the same accent palette for both GroveNFC and Unit NFC to avoid UI mismatch.
 
-inline bool isNfcUnitMode() { return nfc_module_name == "NFC Unit"; }
+inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
 inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
   if (isNfcUnitMode()) {
     return type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
@@ -3170,7 +3170,7 @@ bool applyDumpToCurrentType(const String& path, bool remember_selection, bool au
   }
 
   if (isNfcUnitMode() && emu_type == EmuType::MF1K) {
-    if (!silent_fail) emu_dump_status = "MF1K unsupported on NFC Unit";
+    if (!silent_fail) emu_dump_status = "MF1K unsupported on Unit NFC";
     else emu_dump_status = prev_status;
     return false;
   }
@@ -3667,7 +3667,7 @@ void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
     d.setTextColor(accent, TFT_BLACK);
     d.setCursor(x + 2, ty); d.print("IIC Hardware"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(x + 2 + indent, ty); d.print("M5 NFC Unit"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("M5 Unit NFC"); ty += line_h;
     d.setCursor(x + 2 + indent, ty); d.print("MT GroveNFC"); ty += line_h;
     ty += line_h / 2;
     d.setTextColor(accent, TFT_BLACK);
@@ -4350,7 +4350,7 @@ void drawScreen(bool popup_only = false) {
   if (menu_page == MenuPage::Diagnose) accent = TFT_YELLOW;
   if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
   if (menu_page == MenuPage::About) accent = TFT_CYAN;
-  // NFC Unit and GroveNFC share the same color mapping.
+  // Unit NFC and GroveNFC share the same color mapping.
 
 #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
   if (w > h) {
@@ -4734,7 +4734,7 @@ void drawScreen(bool popup_only = false) {
       }
     } else if (menu_page == MenuPage::Emulator) {
       if (isNfcUnitMode()) {
-        // NFC Unit: card-style layout — type centred + arrows + ID below. No Slot.
+        // Unit NFC: card-style layout — type centred + arrows + ID below. No Slot.
         d.fillRect(4, content_top + 2, w - 8, content_h - 4, TFT_BLACK);
         const int ex = 4, ey = content_top + 2, ew = w - 8, eh = content_h - 4;
         d.setFont(&fonts::Font0);
@@ -5206,7 +5206,7 @@ void drawScreen(bool popup_only = false) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
     if (isNfcUnitMode()) {
-      // NFC Unit: replicate Reader card style (type centred + arrows + ID below).
+      // Unit NFC: replicate Reader card style (type centred + arrows + ID below).
       // Clear the whole card area (overwriting the header title_line printed above).
       const int ex = 4, ey = 26, ew = w - 8, eh = h - 30;
       d.fillRect(ex, ey, ew, eh, TFT_BLACK);
@@ -6198,7 +6198,7 @@ void nfcWorkerTask(void* /*param*/) {
           case NfcCmd::StartEmulation: {
             auto startForType = [&](EmuType et) -> bool {
               if (isNfcUnitMode()) {
-                // NFC Unit supports NTAG213/215/216 via EmulationLayerA, FeliCa via EmulationLayerF
+                // Unit NFC supports NTAG213/215/216 via EmulationLayerA, FeliCa via EmulationLayerF
                 switch (et) {
                   case EmuType::N213:  return nfc.startNfcUnitEmulationNtag(213);
                   case EmuType::N215:  return nfc.startNfcUnitEmulationNtag(215);
@@ -6220,6 +6220,10 @@ void nfcWorkerTask(void* /*param*/) {
             };
 
             if (nfc_ready) {
+              // Recover module to clean state before any emulation type switch
+              // so that stale register/EERPOM state from the previous type does
+              // not interfere with the new emulation.
+              nfc.recover();
               // Stop RF first so external reader re-detects with new protocol
               if (isNfcUnitMode()) {
                 nfc.stopNfcUnitEmulation();
@@ -6230,11 +6234,17 @@ void nfcWorkerTask(void* /*param*/) {
               EmuType et = static_cast<EmuType>(nfc_w_emu_type);
               bool ok = startForType(et);
               if (!ok) {
-                // First-start races are observed on some NFC Unit fw/host combos.
+                // First-start races are observed on some Unit NFC fw/host combos.
                 bool recovered = nfc.recover();
                 if (recovered) recovered = nfc.begin();
                 if (recovered) {
                   ok = startForType(et);
+                  if (!ok) {
+                    // Leave module clean after retry failure so the next
+                    // StartEmulation (e.g. after user switches type) begins
+                    // from a known state rather than a stale/corrupted mode.
+                    nfc.recover();
+                  }
                 } else {
                   nfc_ready = false;
                 }
@@ -6313,7 +6323,7 @@ void nfcWorkerTask(void* /*param*/) {
     const bool nfc_unit_emulating = (isNfcUnitMode() && nfc.isNfcUnitEmulating());
 
     // --- maintainNfcConnection (health check / reconnect) ---
-    // IMPORTANT: while NFC Unit emulation is active, skip ping/recover checks.
+    // IMPORTANT: while Unit NFC emulation is active, skip ping/recover checks.
     // ping() may reconfigure mode and can disrupt the emulation RF state.
     if (!nfc_unit_emulating && xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       if (w_ready) {
@@ -6381,7 +6391,7 @@ void nfcWorkerTask(void* /*param*/) {
             w_last_reader_success_ms = now;
           } else {
             if (w_reader_fail_streak < 0xFF) ++w_reader_fail_streak;
-            // NFC Unit can occasionally get into a scan-stall state on CardPuter-class boards.
+            // Unit NFC can occasionally get into a scan-stall state on CardPuter-class boards.
             // If we keep polling with no hit for a while, proactively recover + re-begin
             // so users don't need to leave/re-enter Reader page.
             if (isNfcUnitMode() && !nfc_w_reader_14b_only && w_reader_fail_streak >= 12) {
@@ -6470,11 +6480,11 @@ void nfcWorkerTask(void* /*param*/) {
       }
     }
 
-    // --- NFC Unit emulation state machine update ---
+    // --- Unit NFC emulation state machine update ---
     // emu_a.update() must be called continuously while emulating.
     // This section runs every task tick (5ms) regardless of current page.
     if (nfc_ready && isNfcUnitMode() && nfc.isNfcUnitEmulating()) {
-      // Keep emulation update cadence as high as possible on NFC Unit.
+      // Keep emulation update cadence as high as possible on Unit NFC.
       // Avoid mutex waits here: this code already runs inside the single NFC worker task.
       nfc.tickNfcUnitEmulation();
       vTaskDelay(pdMS_TO_TICKS(1));
@@ -6589,7 +6599,7 @@ void processHealthResult() {
     hw_ver = nhw;
     fw_ver = nfw;
     nfc_module_name = nfc.deviceName();
-    // Clamp home_index in case it exceeds the new page count (e.g. switching from Grove to NFC Unit)
+    // Clamp home_index in case it exceeds the new page count (e.g. switching from Grove to Unit NFC)
     if (home_index >= homePageCount()) home_index = 0;
     if (menu_page == MenuPage::Reader) {
       last_card.valid = false;
@@ -6789,7 +6799,7 @@ void loop() {
     // Emulation is most timing-sensitive: keep keyboard polling sparse but still usable.
     update_interval_ms = 220;
   } else if (nfcunit_active_page) {
-    // Reader/NDEF/Piano on NFC Unit can still suffer from I2C contention on CardPuter keyboard scans.
+    // Reader/NDEF/Piano on Unit NFC can still suffer from I2C contention on CardPuter keyboard scans.
     update_interval_ms = 70;
   }
 
@@ -6816,7 +6826,7 @@ void loop() {
     btn_hold_latched = false;
   }
 
-  // Some NFC Unit firmware revisions occasionally fail the first emulation start.
+  // Some Unit NFC firmware revisions occasionally fail the first emulation start.
   // Retry periodically while staying on Emulator page until emulation is active.
   if (!in_home && menu_page == MenuPage::Emulator && nfc_ready && !emu_switch_apply_pending && !emu_started) {
     const uint32_t now_retry = millis();

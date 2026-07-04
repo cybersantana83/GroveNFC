@@ -148,7 +148,7 @@ class GroveNFC {
   void clearCustomDumpFlags();
 
   String bytesToHex(const uint8_t* data, size_t len, bool reverse = false);
-  void writeMifare1KImage();
+  bool writeMifare1KImage();
   void writeNtag213Image();
   void writeNtag215Image();
   void writeNtag216Image();
