@@ -5574,13 +5574,14 @@ bool initNfcAtBoot() {
 
   if (tryInit()) return true;
 
-#if defined(APP_TARGET_CARDPUTER_ADV)
+#if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   // Some CardPuter ADV wiring harnesses label Grove as G1/G2 but route I2C in reverse order.
   // If default (GPIO2/GPIO1) fails, retry with swapped pins (GPIO1/GPIO2).
+  // Safe to run on both CardPuter variants — harmless on standard boards.
   if (active_sda_pin == 2 && active_scl_pin == 1) {
     active_sda_pin = 1;
     active_scl_pin = 2;
-    Serial.println("[BOOT] ADV fallback: retry I2C on SDA=GPIO1 SCL=GPIO2");
+    Serial.println("[BOOT] I2C fallback: retry on SDA=GPIO1 SCL=GPIO2");
     beginWireWithActivePins();
     if (tryInit()) return true;
   }
