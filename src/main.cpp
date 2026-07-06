@@ -809,13 +809,13 @@ const char* emuTypeShort(EmuType type) {
 String emulatorDisplayId(EmuType type, uint8_t slot) {
   String base;
   if (type == EmuType::MF1K) {
-    base = "645EE56A";
+    base = "6117C420";
   } else if (type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216) {
     base = "04311D01174503";
   } else if (type == EmuType::ISO14B) {
     base = "11223344";
   } else if (type == EmuType::Felica) {
-    base = "010106010E0F3F00";
+    base = "02FE123456789ABC";
   } else {
     base = "E0070050B902C6C1";
   }
