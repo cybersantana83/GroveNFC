@@ -115,6 +115,9 @@ class GroveNFC {
   bool startEmulationISO15();
   bool startNfcUnitEmulation(bool use_ntag213);
   bool startNfcUnitEmulationNtag(uint16_t ntag_type);  // 213, 215, 216
+  bool loadMifare1KDump(const uint8_t* data, size_t len);
+  bool autoStartMifare1K();
+  bool startNfcUnitEmulationMifare1K();
   bool startNfcUnitEmulationFelica();
   void stopNfcUnitEmulation();
   bool isNfcUnitEmulating() const;

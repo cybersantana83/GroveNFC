@@ -157,8 +157,8 @@ int active_scl_pin = kSclPin;
 // single pushSprite() DMA-blits the complete frame to the physical display).
 LGFX_Sprite g_canvas;
 MenuPage menu_page = MenuPage::Reader;
-EmuType emu_type = EmuType::N213;
-EmuType emu_menu_type = EmuType::N213;
+EmuType emu_type = EmuType::MF1K;
+EmuType emu_menu_type = EmuType::MF1K;
 EmuConfigStage emu_config_stage = EmuConfigStage::None;
 bool in_home = true;
 int home_index = 0;
@@ -559,7 +559,7 @@ const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, Menu
 inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
 inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
   if (isNfcUnitMode()) {
-    return type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
+    return type == EmuType::MF1K || type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
   }
   // Grove module does not support Felica card emulation.
   return type != EmuType::Felica;
@@ -696,7 +696,7 @@ uint8_t dumpsMenuCount() {
 }
 
 bool dumpsMenuItemDisabled(uint8_t idx) {
-  return !dumps_pick_for_emu && isNfcUnitMode() && idx == 0;
+  return false;
 }
 
 String dumpDisplayName(const String& path, size_t limit = 18);
@@ -3169,11 +3169,7 @@ bool applyDumpToCurrentType(const String& path, bool remember_selection, bool au
     return false;
   }
 
-  if (isNfcUnitMode() && emu_type == EmuType::MF1K) {
-    if (!silent_fail) emu_dump_status = "MF1K unsupported on Unit NFC";
-    else emu_dump_status = prev_status;
-    return false;
-  }
+  if (false) {}  // MF1K supported on Unit NFC
 
   if (!nfc_ready) {
     if (!silent_fail) emu_dump_status = "NFC not ready";
@@ -5636,7 +5632,7 @@ void enterCurrentFeature() {
     last_ndef_auto_ms = 0;
   } else if (menu_page == MenuPage::Emulator) {
     emu_switch_apply_pending = false;
-    emu_type = isNfcUnitMode() ? EmuType::N213 : EmuType::MF1K;
+    emu_type = EmuType::MF1K;  // Default MFC1K
     emu_menu_index = 1;
     emu_show_menu = false;
     const String saved_path = loadLastDumpForType(emu_type);
@@ -6205,7 +6201,8 @@ void nfcWorkerTask(void* /*param*/) {
                   case EmuType::N215:  return nfc.startNfcUnitEmulationNtag(215);
                   case EmuType::N216:  return nfc.startNfcUnitEmulationNtag(216);
                   case EmuType::Felica:return nfc.startNfcUnitEmulationFelica();
-                  default:             return false;  // MF1K, ISO14B, ISO15 not supported
+                  case EmuType::MF1K:  return nfc.startNfcUnitEmulationMifare1K();
+                  default:             return false;  // ISO14B, ISO15 not supported
                 }
               }
               switch (et) {
@@ -6788,9 +6785,26 @@ void setup() {
     0                 // Core 0
   );
   Serial.println("[BOOT] NFC worker started on Core 0");
+
+  // Wait for NFC worker health check, then start MFC1K via command queue
+  delay(2000);
+  if (isNfcUnitMode()) {
+    emu_type = EmuType::MF1K;
+    nfc_w_emu_type = EmuType::MF1K;
+        Serial.println("[BOOT] M1K emulation via autoStartMifare1K...");
+    if (nfc.autoStartMifare1K()) {
+      Serial.println("[BOOT] M1K emulation OK");
+      emu_started = true;
+    } else {
+      Serial.println("[BOOT] M1K emulation FAILED");
+    }
+  }
 }
 
+
 void loop() {
+
+
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   static uint32_t s_cardputer_last_update_ms = 0;
   const bool nfcunit_active_page = (!in_home && isNfcUnitMode());
