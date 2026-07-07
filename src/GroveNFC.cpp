@@ -755,22 +755,35 @@ struct GroveNFC::NfcUnitBridge {
     // WORKAROUND: force mode to V so configure_emulation_a() actually runs
     // (NFCMode() != NFC::A → no short-circuit → sets targ=1 in MODE_DEFINITION)
     unit.configureNFCMode(m5::nfc::NFC::V);
+    Serial.println("[M1K-DBG] configureNFCMode(V) done");
     auto cfg = unit.config(); cfg.emulation = true; cfg.mode = m5::nfc::NFC::A; unit.config(cfg);
     bool began = units.begin();
+    Serial.printf("[M1K-DBG] units.begin(emu=true) -> %d\n", (int)began);
     if (!began) { cfg.emulation = false; unit.config(cfg); units.begin(); return false; }
     if (!custom_m1k) memset(emu_mem_m1k, 0, sizeof(emu_mem_m1k));
-    // Use UID from loaded dump data (block 0, bytes 0-3), or fallback to kEmuUID
     uint8_t m1k_uid[4] = {kEmuUID[0], kEmuUID[1], kEmuUID[2], kEmuUID[3]};
     if (custom_m1k) {
       memcpy(m1k_uid, emu_mem_m1k, 4);
     }
+    Serial.printf("[M1K-DBG] UID=%02X%02X%02X%02X cust=%d\n", m1k_uid[0], m1k_uid[1], m1k_uid[2], m1k_uid[3], (int)custom_m1k);
     m5::nfc::a::PICC picc{};
     if (!picc.emulate(m5::nfc::a::Type::MIFARE_Classic_1K, m1k_uid, 4)) {
-      cfg.emulation = false; unit.config(cfg); units.begin(); return false;
+      Serial.println("[M1K-DBG] picc.emulate failed"); cfg.emulation = false; unit.config(cfg); units.begin(); return false;
     }
+    Serial.printf("[M1K-DBG] PICC valid=%d type=%d size=%d atqa=0x%04X sak=0x%02X\n",
+                  (int)picc.valid(), (int)picc.type, picc.size, picc.atqa, picc.sak);
+    // Ensure en=1 BEFORE beginM1K so goto_idle() doesn't loop back to goto_off()
+    unit.set_bit_register8(static_cast<uint8_t>(0xAA), static_cast<uint8_t>(0x03));
+    Serial.println("[M1K-DBG] Calling emu_m1k.beginM1K...");
     if (!emu_m1k.beginM1K(picc, emu_mem_m1k, sizeof(emu_mem_m1k))) {
       cfg.emulation = false; unit.config(cfg); units.begin(); return false;
     }
+    // Safety net: goto_off() may have cleared en|rx_en. Re-enable chip.
+    unit.set_bit_register8(static_cast<uint8_t>(0x0A), static_cast<uint8_t>(0x80));
+    unit.set_bit_register8(static_cast<uint8_t>(0xAA), static_cast<uint8_t>(0x03));
+    unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_CLEAR_FIFO);
+    unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_UNMASK_RECEIVE_DATA);
+    unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_GO_TO_SENSE);
     is_emulating = true; emu_is_m1k = true;
     return true;
   }
