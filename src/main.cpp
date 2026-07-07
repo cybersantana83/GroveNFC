@@ -6795,6 +6795,7 @@ void setup() {
     if (nfc.autoStartMifare1K()) {
       Serial.println("[BOOT] M1K emulation OK");
       emu_started = true;
+      nfc_ready = true;
     } else {
       Serial.println("[BOOT] M1K emulation FAILED");
     }

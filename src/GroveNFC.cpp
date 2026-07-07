@@ -982,7 +982,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
     lfsr.next32(); lfsr.next32();
     uint32_t at = lfsr.next32();
     uint8_t tx[4]; encrypt32(tx, at);
-    return send_response(tx, 4, 10) ? M1kState::Active : M1kState::Idle;
+    return unit().nfcaEmulationTransmit(tx, 4) ? M1kState::Active : M1kState::Idle;
   }
 
   if (substate == SubState::WritePending && rx_len >= 16) {
@@ -990,7 +990,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
     uint32_t off = emulatePICC().unitSize() * pending_block;
     if (off + 16 <= _memory_size) {
       memcpy(_memory + off, rx, 16);
-      return send_response(&m5::nfc::a::ACK_NIBBLE, 1, 5) ? M1kState::Active : M1kState::Idle;
+      return unit().nfcaEmulationTransmit(&m5::nfc::a::ACK_NIBBLE, 1) ? M1kState::Active : M1kState::Idle;
     }
     return M1kState::Idle;
   }
@@ -1002,7 +1002,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
       if (rx_len == 2) {
         uint32_t off = emulatePICC().unitSize() * rx[1];
         if (off + 16 <= _memory_size)
-          return send_response(_memory + off, 16, 4) ? M1kState::Active : M1kState::Idle;
+          return unit().nfcaEmulationTransmit(_memory + off, 16) ? M1kState::Active : M1kState::Idle;
       }
       return M1kState::Idle;
     }
@@ -1013,7 +1013,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
         uint8_t nt[4];
         nt[0] = nt_tag; nt[1] = nt_tag >> 8; nt[2] = nt_tag >> 16; nt[3] = nt_tag >> 24;
         substate = SubState::AuthSent;
-        return send_response(nt, 4, 10) ? M1kState::Active : M1kState::Idle;
+        return unit().nfcaEmulationTransmit(nt, 4) ? M1kState::Active : M1kState::Idle;
       }
       return M1kState::Idle;
     }
@@ -1021,7 +1021,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
       if (rx_len == 2) {
         pending_block = rx[1];
         substate = SubState::WritePending;
-        return send_response(&m5::nfc::a::ACK_NIBBLE, 1, 5) ? M1kState::Active : M1kState::Idle;
+        return unit().nfcaEmulationTransmit(&m5::nfc::a::ACK_NIBBLE, 1) ? M1kState::Active : M1kState::Idle;
       }
       return M1kState::Idle;
     }
