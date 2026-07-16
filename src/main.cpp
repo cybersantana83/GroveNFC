@@ -318,6 +318,7 @@ uint8_t dumps_menu_index = 0;
 bool dumps_pick_for_emu = false;
 String dumps_preview_text;
 size_t dumps_preview_offset = 0;
+size_t m5paper_emu_hex_offset = 0;
 uint8_t dumps_preview_font_level = 1;
 String emu_ap_last_upload_path;
 String dumps_qr_payload;
@@ -753,6 +754,8 @@ void switchEmuType(int8_t dir);
 void selectEmuType(EmuType type);
 void stopAllModes();
 void refreshDumpFiles(bool filter_by_current_type);
+void drawM5PaperEmulatorHexTable(lgfx::v1::LGFXBase& d);
+void refreshM5PaperEmulatorHexTable();
 bool loadDumpIntoEmulator(const String& path);
 String buildDumpPreview(const String& path);
 String dumpTypeLabel(const String& path);
@@ -875,7 +878,10 @@ static bool handleM5PaperFeatureTouch() {
       if (m5PaperHit(touch, grid_x + col * (cell_w + gap),
                      grid_y + row * (cell_h + gap), cell_w, cell_h)) {
         const EmuType selected = static_cast<EmuType>(i);
-        if (isEmuTypeSupportedCurrentMode(selected)) selectEmuType(selected);
+        if (isEmuTypeSupportedCurrentMode(selected)) {
+          m5paper_emu_hex_offset = 0;
+          selectEmuType(selected);
+        }
         return true;
       }
     }
@@ -887,6 +893,44 @@ static bool handleM5PaperFeatureTouch() {
       refreshDumpFiles(true);
       drawScreen();
       return true;
+    }
+    constexpr int hex_x = 24, hex_y = 558, hex_w = 492, hex_h = 382;
+    const uint8_t type_idx = static_cast<uint8_t>(emu_type);
+    const String dump_path = type_idx < static_cast<uint8_t>(EmuType::Count)
+                                 ? emu_dump_loaded_path[type_idx]
+                                 : String();
+    if (!dump_path.isEmpty() && littlefs_ready && LittleFS.exists(dump_path)) {
+      const bool two_columns = emu_type == EmuType::N213 || emu_type == EmuType::N215 ||
+                               emu_type == EmuType::N216 || emu_type == EmuType::ISO15;
+      const size_t page_items = two_columns ? 20 : 10;
+      const String preview = buildDumpPreview(dump_path);
+      size_t start = 0;
+      for (int header = 0; header < 3 && start < preview.length(); ++header) {
+        const int nl = preview.indexOf('\n', start);
+        start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+      }
+      size_t total = 0;
+      while (start < preview.length()) {
+        ++total;
+        const int nl = preview.indexOf('\n', start);
+        start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+      }
+      if (m5PaperHit(touch, hex_x, hex_y, hex_w, hex_h / 2)) {
+        if (total > page_items) {
+          if (m5paper_emu_hex_offset >= page_items) m5paper_emu_hex_offset -= page_items;
+          else m5paper_emu_hex_offset = ((total - 1) / page_items) * page_items;
+        }
+        refreshM5PaperEmulatorHexTable();
+        return true;
+      }
+      if (m5PaperHit(touch, hex_x, hex_y + hex_h / 2, hex_w, hex_h - hex_h / 2)) {
+        if (total > page_items) {
+          m5paper_emu_hex_offset += page_items;
+          if (m5paper_emu_hex_offset >= total) m5paper_emu_hex_offset = 0;
+        }
+        refreshM5PaperEmulatorHexTable();
+        return true;
+      }
     }
   } else if (menu_page == MenuPage::WebFiles && dumps_stage == DumpsStage::Browse) {
     if (m5paper_dump_delete_confirm) {
@@ -3650,6 +3694,7 @@ bool loadDumpIntoEmulator(const String& path) {
   if (!applyDumpToCurrentType(path, true, false)) {
     return false;
   }
+  m5paper_emu_hex_offset = 0;
   emu_switch_apply_pending = false;
   startCurrentEmulation();
   return emu_started;
@@ -4922,6 +4967,123 @@ static void drawM5PaperReaderPage() {
   drawM5PaperButton(24, 820, w - 48, 88, "SCAN NOW", true);
 }
 
+void drawM5PaperEmulatorHexTable(lgfx::v1::LGFXBase& d) {
+  constexpr int x = 24, y = 558, w = 492, h = 382;
+  constexpr int header_h = 42, row_h = 33;
+  const bool two_columns = emu_type == EmuType::N213 || emu_type == EmuType::N215 ||
+                           emu_type == EmuType::N216 || emu_type == EmuType::ISO15;
+  constexpr int rows_per_column = 10;
+  const size_t page_items = two_columns ? rows_per_column * 2 : rows_per_column;
+  const uint8_t type_idx = static_cast<uint8_t>(emu_type);
+  const String path = type_idx < static_cast<uint8_t>(EmuType::Count)
+                          ? emu_dump_loaded_path[type_idx]
+                          : String();
+
+  d.fillRoundRect(x, y, w, h, 18, TFT_WHITE);
+  d.drawRoundRect(x, y, w, h, 18, TFT_BLACK);
+  d.setFont(&fonts::Font0);
+  d.setTextSize(2);
+  d.setTextColor(TFT_BLACK, TFT_WHITE);
+  String header_text = "DUMP HEX";
+  if (!path.isEmpty()) {
+    header_text = path.substring(path.lastIndexOf('/') + 1);
+    const int title_max_w = w - 105;
+    bool shortened = false;
+    while (!header_text.isEmpty() && d.textWidth(header_text + "...") > title_max_w) {
+      header_text.remove(header_text.length() - 1);
+      shortened = true;
+    }
+    if (shortened) header_text += "...";
+  }
+  d.setCursor(x + 14, y + 11);
+  d.print(header_text);
+
+  if (path.isEmpty() || !littlefs_ready || !LittleFS.exists(path)) {
+    d.setTextColor(TFT_BLACK, TFT_WHITE);
+    d.setTextSize(3);
+    const String built_in = "BUILT-IN DATA";
+    d.setCursor(x + (w - d.textWidth(built_in)) / 2, y + 142);
+    d.print(built_in);
+    d.setTextSize(2);
+    const String hint = "Load a dump to inspect its HEX data";
+    d.setCursor(x + (w - d.textWidth(hint)) / 2, y + 194);
+    d.print(hint);
+    return;
+  }
+
+  const String preview = buildDumpPreview(path);
+  size_t data_start = 0;
+  for (int header = 0; header < 3 && data_start < preview.length(); ++header) {
+    const int nl = preview.indexOf('\n', data_start);
+    data_start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+  }
+  size_t total = 0;
+  for (size_t p = data_start; p < preview.length(); ++total) {
+    const int nl = preview.indexOf('\n', p);
+    p = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+  }
+  if (total == 0) m5paper_emu_hex_offset = 0;
+  else if (m5paper_emu_hex_offset >= total) m5paper_emu_hex_offset = ((total - 1) / page_items) * page_items;
+
+  size_t start = data_start;
+  for (size_t skipped = 0; skipped < m5paper_emu_hex_offset && start < preview.length(); ++skipped) {
+    const int nl = preview.indexOf('\n', start);
+    start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+  }
+
+  const size_t pages = total == 0 ? 1 : (total + page_items - 1) / page_items;
+  const size_t page = total == 0 ? 1 : m5paper_emu_hex_offset / page_items + 1;
+  const String page_text = String(page) + "/" + String(pages);
+  d.setTextSize(2);
+  d.setTextColor(TFT_BLACK, TFT_WHITE);
+  d.setCursor(x + w - 14 - d.textWidth(page_text), y + 11);
+  d.print(page_text);
+
+  const int data_y = y + header_h + 5;
+  const int col_w = (w - 20) / 2;
+  for (size_t item = 0; item < page_items && start < preview.length(); ++item) {
+    int nl = preview.indexOf('\n', start);
+    if (nl < 0) nl = preview.length();
+    String line = preview.substring(start, static_cast<size_t>(nl));
+    start = static_cast<size_t>(nl + 1);
+    const int colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const unsigned index = static_cast<unsigned>(line.substring(0, colon).toInt());
+    String hex = line.substring(colon + 1);
+    const int ascii = hex.indexOf('|');
+    String ascii_text;
+    if (ascii >= 0) {
+      ascii_text = hex.substring(ascii + 1);
+      ascii_text.trim();
+      hex = hex.substring(0, ascii);
+    }
+    hex.trim();
+    char index_text[8]{};
+    snprintf(index_text, sizeof(index_text), "%03u", index);
+    const String display = two_columns
+                               ? String(index_text) + ":" + hex + " " + ascii_text
+                               : String(index_text) + ": " + hex;
+    const int row = two_columns ? static_cast<int>(item % rows_per_column) : static_cast<int>(item);
+    const int col = two_columns ? static_cast<int>(item / rows_per_column) : 0;
+    const int rx = x + 10 + col * col_w;
+    const int ry = data_y + row * row_h;
+    const int rw = two_columns ? col_w : w - 20;
+    if ((row & 1) == 0) d.fillRect(rx, ry - 3, rw, row_h, 0xDEFB);
+    d.setTextColor(TFT_BLACK, (row & 1) == 0 ? 0xDEFB : TFT_WHITE);
+    d.setTextSize(two_columns ? 2 : 1);
+    d.setCursor(rx + 7, ry + (two_columns ? 3 : 8));
+    d.print(display);
+  }
+  if (two_columns) d.drawLine(x + w / 2, y + header_h, x + w / 2, y + h - 5, TFT_LIGHTGREY);
+}
+
+void refreshM5PaperEmulatorHexTable() {
+  constexpr int x = 24, y = 558, w = 492, h = 382;
+  drawM5PaperEmulatorHexTable(g_canvas);
+  drawM5PaperEmulatorHexTable(M5.Display);
+  M5.Display.display(x, y, w, h);
+}
+
 static void drawM5PaperEmulatorPage() {
   const int w = g_canvas.width();
   g_canvas.fillScreen(TFT_WHITE);
@@ -4973,52 +5135,7 @@ static void drawM5PaperEmulatorPage() {
   g_canvas.setCursor(panel_x + 160, panel_y + 112);
   g_canvas.print(ellipsizeCanvasText(formatUidDisplay(activeEmulatorDisplayId(emu_type)), panel_w - 200));
 
-  const int table_x = 24, table_y = 558, table_w = w - 48, table_h = 350;
-  g_canvas.drawRoundRect(table_x, table_y, table_w, table_h, 18, TFT_BLACK);
-  g_canvas.fillRect(table_x + 1, table_y + 1, table_w - 2, 48, TFT_BLACK);
-  g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  g_canvas.setTextSize(2);
-  g_canvas.setCursor(table_x + 18, table_y + 14);
-  g_canvas.print("DUMP HEX");
-  const uint8_t type_idx = static_cast<uint8_t>(emu_type);
-  const String dump_path = type_idx < static_cast<uint8_t>(EmuType::Count)
-                               ? emu_dump_loaded_path[type_idx]
-                               : String();
-  if (!dump_path.isEmpty() && littlefs_ready && LittleFS.exists(dump_path)) {
-    String dump_name = dump_path.substring(dump_path.lastIndexOf('/') + 1);
-    g_canvas.setCursor(table_x + 150, table_y + 14);
-    g_canvas.print(ellipsizeCanvasText(dump_name, table_w - 174));
-
-    const String preview = buildDumpPreview(dump_path);
-    size_t start = 0;
-    for (int header = 0; header < 3 && start < preview.length(); ++header) {
-      const int nl = preview.indexOf('\n', start);
-      start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
-    }
-    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
-    g_canvas.setTextSize(2);
-    for (int row = 0; row < 9 && start < preview.length(); ++row) {
-      int nl = preview.indexOf('\n', start);
-      if (nl < 0) nl = preview.length();
-      String line = preview.substring(start, static_cast<size_t>(nl));
-      start = static_cast<size_t>(nl + 1);
-      const int y = table_y + 61 + row * 31;
-      if ((row & 1) == 0) g_canvas.fillRect(table_x + 1, y - 4, table_w - 2, 30, 0xDEFB);
-      g_canvas.setTextColor(TFT_BLACK, (row & 1) == 0 ? 0xDEFB : TFT_WHITE);
-      g_canvas.setCursor(table_x + 16, y);
-      g_canvas.print(ellipsizeCanvasText(line, table_w - 32));
-    }
-  } else {
-    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
-    g_canvas.setTextSize(3);
-    const String built_in = "BUILT-IN DATA";
-    g_canvas.setCursor(table_x + (table_w - g_canvas.textWidth(built_in)) / 2, table_y + 142);
-    g_canvas.print(built_in);
-    g_canvas.setTextSize(2);
-    const String hint = "Load a dump to inspect its HEX data";
-    g_canvas.setCursor(table_x + (table_w - g_canvas.textWidth(hint)) / 2, table_y + 194);
-    g_canvas.print(hint);
-  }
+  drawM5PaperEmulatorHexTable(g_canvas);
   g_canvas.setTextSize(2);
   g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
 }
