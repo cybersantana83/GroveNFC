@@ -92,13 +92,9 @@ constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
 constexpr uint32_t kReaderAnimStepUs = 8000;
 constexpr uint32_t kReaderSweepUs = 820000;
-constexpr bool kAutoBootDebug =
-#if defined(APP_TARGET_M5PAPER)
-  false
-#else
-  true
-#endif
-;
+// Diagnostics remain available from the menu, but must never replace the
+// first normal application screen on any target.
+constexpr bool kAutoBootDebug = false;
 constexpr uint32_t kBootDebugShowMs = 2500;
 constexpr uint8_t kSpeakerVolume = 160;
 constexpr uint8_t kEmuActionCount = 2;
@@ -7550,7 +7546,11 @@ void nfcWorkerTask(void* /*param*/) {
       // Keep emulation update cadence as high as possible on Unit NFC.
       // Avoid mutex waits here: this code already runs inside the single NFC worker task.
       nfc.tickNfcUnitEmulation();
-      vTaskDelay(pdMS_TO_TICKS(1));
+      // Reader commands arrive immediately after anticollision/selection.
+      // A timed delay here makes Android/Flipper GET_VERSION and READ frames
+      // intermittently miss their response window. Yield without sleeping so
+      // the NFC state machine can be serviced again as soon as Core 0 runs.
+      taskYIELD();
     } else {
       vTaskDelay(pdMS_TO_TICKS(5));  // yield to other tasks
     }

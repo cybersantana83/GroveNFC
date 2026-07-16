@@ -125,8 +125,8 @@ static const uint8_t kNfcUnitNtag213Template[180] = {
   0,0,0,0, 0,0,0,0,
   // Pages 40-44: NTAG213 config (official values)
   0x00, 0x00, 0x00, 0xBD,
-  0x04, 0x00, 0x00, 0xFF,
-  0x00, 0x05, 0x00, 0x00,
+  0x02, 0x00, 0x00, 0xFF,
+  0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00,
 };
@@ -638,14 +638,24 @@ struct GroveNFC::NfcUnitBridge {
     has_last_picc_v = false;
     has_last_picc_b = false;
 
-    // WORKAROUND: configureEmulationMode(A) has a short-circuit check
-    // "if (NFCMode() == mode) return true" that skips hardware setup when
-    // _nfcMode is already A (set by the first reader-mode begin).
-    // Force mode to V so the emulation path actually runs configure_emulation_a().
-    unit.configureNFCMode(m5::nfc::NFC::V);
+    // configureEmulationMode(A) short-circuits when the driver's cached mode
+    // is already A, skipping the actual listener hardware setup. A live
+    // configureNFCMode(V) is not reliable on Unit NFC (the ISO15693 scanner
+    // reproduces this), so prime V with a complete reader-mode reinitialize.
+    auto cfg = unit.config();
+    cfg.emulation = false;
+    cfg.mode = m5::nfc::NFC::V;
+    unit.config(cfg);
+    const bool primed = unit.begin();
+    Serial.printf("[EMU] reader V prime -> %d\n", static_cast<int>(primed));
+    if (!primed || !unit.isNFCMode(m5::nfc::NFC::V)) {
+      cfg.mode = m5::nfc::NFC::A;
+      unit.config(cfg);
+      unit.begin();
+      return false;
+    }
 
     // Switch unit config to emulation BEFORE units.begin() – required by driver
-    auto cfg = unit.config();
     cfg.emulation = true;
     cfg.mode = m5::nfc::NFC::A;
     unit.config(cfg);
@@ -1354,13 +1364,6 @@ void GroveNFC::tickNfcUnitEmulation() {
     nfc_unit_bridge_->emu_f.update();
   else
     nfc_unit_bridge_->emu_a.update();
-  if (!nfc_unit_bridge_->emu_is_felica && !nfc_unit_bridge_->emu_is_m1k) {
-    const int8_t state = static_cast<int8_t>(nfc_unit_bridge_->emu_a.state());
-    if (state != nfc_unit_bridge_->last_logged_emu_state) {
-      nfc_unit_bridge_->last_logged_emu_state = state;
-      Serial.printf("[EMU-A] state=%d\n", static_cast<int>(state));
-    }
-  }
 #endif
 }
 
