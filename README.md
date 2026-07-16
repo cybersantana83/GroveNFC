@@ -1,6 +1,6 @@
-# GroveNFC Reference Demo (AtomS3 + M5Stick + CardPuter Series)
+# GroveNFC Reference Demo (AtomS3 + M5Stick + CardPuter + M5Paper)
 
-Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware) / CardPuter / CardPuter ADV (single firmware logic)**.
+Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware) / CardPuter / CardPuter ADV (single firmware logic) / M5Paper**.
 
 This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
 
@@ -42,6 +42,7 @@ Current board I2C pins (auto-selected in `src/main.cpp` by build target):
 - M5StickS3: SDA `GPIO9`, SCL `GPIO10`
 - M5StickC Plus (1.1 / Plus2 unified): SDA `GPIO32`, SCL `GPIO33`
 - CardPuter / CardPuter ADV: SDA `GPIO2`, SCL `GPIO1`
+- M5Paper Port A: SDA `GPIO25`, SCL `GPIO32`
 - I2C address: `0x48`
 
 Pin mapping note:
@@ -66,6 +67,16 @@ CardPuter / CardPuter ADV keyboard shortcuts (recommended):
 - `Direction Down/Right`: next item (also supports `S/D/J/L` aliases)
 - `Enter`: confirm / enter feature
 - `ESC` (or `Del` fallback): back / cancel
+
+M5Paper controls:
+
+- Tap a home-screen tile to open Reader, Read NDEF, Emulator, Diagnose, or the other available tools.
+- The UI uses the native `540 x 960` portrait orientation.
+- Tap `< Back` in the top status bar to return home; battery level and percentage are shown at the right.
+- Button C: previous item / back when held.
+- Button B: select / confirm when held.
+- Button A: next item.
+- E-ink screens refresh only when their displayed state changes; LCD-style animation and marquee redraws are intentionally replaced by final-state updates.
 
 ### Home page
 
@@ -133,6 +144,7 @@ Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
     - `m5stack-stickcplus2` (alias of `m5stack-stickcplus`)
   - `m5stack-cardputer` (CardPuter / CardPuter ADV shared logic)
   - `m5stack-cardputer-adv` (alias of `m5stack-cardputer`)
+  - `m5stack-m5paper`
 4. Open Serial Monitor at `115200`
 
 Example:
@@ -149,6 +161,8 @@ pio run -e m5stack-stickcplus2 -t upload
 pio run -e m5stack-cardputer -t upload
 # or
 pio run -e m5stack-cardputer-adv -t upload
+# or
+pio run -e m5stack-m5paper -t upload --upload-port /dev/cu.usbserial-XXXXXXXX
 pio device monitor -b 115200
 ```
 

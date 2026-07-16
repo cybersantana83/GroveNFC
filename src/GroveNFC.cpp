@@ -328,10 +328,17 @@ private:
   }
 };
 
+class UnitNfcRegisterAccess : public m5::unit::UnitNFC {
+ public:
+  bool setRegisterBits(uint8_t reg, uint8_t bits) {
+    return set_bit_register8(reg, bits);
+  }
+};
+
 
 struct GroveNFC::NfcUnitBridge {
   m5::unit::UnitUnified units;
-  m5::unit::UnitNFC unit;
+  UnitNfcRegisterAccess unit;
   m5::nfc::NFCLayerA nfc_a;
   m5::nfc::NFCLayerV nfc_v;
   m5::nfc::NFCLayerB nfc_b;
@@ -375,13 +382,16 @@ struct GroveNFC::NfcUnitBridge {
   uint8_t emu_mem_ntag216[924];
   uint8_t emu_mem_felica[448];
   uint8_t emu_mem_m1k[1024];
+  uint8_t emu_mem_m4k[4096];
   bool custom_mful = false;
   bool custom_ntag213 = false;
   bool custom_ntag215 = false;
   bool custom_ntag216 = false;
   bool custom_felica = false;
   bool custom_m1k = false;
+  bool custom_m4k = false;
   bool emu_is_m1k = false;
+  int8_t last_logged_emu_state = -1;
 
   NfcUnitBridge()
     : nfc_a(unit), nfc_v(unit), nfc_b(unit), emu_a(unit), emu_f(unit), emu_m1k(unit) {}
@@ -417,6 +427,13 @@ struct GroveNFC::NfcUnitBridge {
         memcpy(emu_mem_m1k, data, m1k_n);
         if (m1k_n < sizeof(emu_mem_m1k)) memset(emu_mem_m1k + m1k_n, 0, sizeof(emu_mem_m1k) - m1k_n);
         custom_m1k = true;
+        return true;
+      }
+      case DumpTagType::Mifare4K: {
+        const size_t n = min(len, sizeof(emu_mem_m4k));
+        memcpy(emu_mem_m4k, data, n);
+        if (n < sizeof(emu_mem_m4k)) memset(emu_mem_m4k + n, 0, sizeof(emu_mem_m4k) - n);
+        custom_m4k = true;
         return true;
       }
       case DumpTagType::Felica: {
@@ -686,6 +703,8 @@ struct GroveNFC::NfcUnitBridge {
 
     is_emulating = true;
     emu_is_felica = false;
+    emu_is_m1k = false;
+    last_logged_emu_state = -1;
     return true;
   }
 
@@ -749,7 +768,8 @@ struct GroveNFC::NfcUnitBridge {
     return true;
   }
 
-  bool beginEmulationMifare1K() {
+  bool beginEmulationMifare(bool four_k) {
+    Serial.println("[M1K-DBG] begin");
     ensureStopped();
     has_last_picc_a = false; has_last_picc_v = false; has_last_picc_b = false;
     // WORKAROUND: force mode to V so configure_emulation_a() actually runs
@@ -757,24 +777,53 @@ struct GroveNFC::NfcUnitBridge {
     unit.configureNFCMode(m5::nfc::NFC::V);
     auto cfg = unit.config(); cfg.emulation = true; cfg.mode = m5::nfc::NFC::A; unit.config(cfg);
     bool began = units.begin();
+    Serial.printf("[M1K-DBG] units.begin=%d\n", static_cast<int>(began));
     if (!began) { cfg.emulation = false; unit.config(cfg); units.begin(); return false; }
-    if (!custom_m1k) memset(emu_mem_m1k, 0, sizeof(emu_mem_m1k));
+    // A blank all-zero MIFARE image has invalid sector trailers and cannot be
+    // authenticated by normal readers. Always seed a usable factory image
+    // when the user has not loaded a dump.
+    uint8_t* memory = four_k ? emu_mem_m4k : emu_mem_m1k;
+    const size_t memory_size = four_k ? sizeof(emu_mem_m4k) : sizeof(emu_mem_m1k);
+    if (four_k ? !custom_m4k : !custom_m1k) {
+      memcpy(emu_mem_m1k, kMifare1KDumpData, sizeof(emu_mem_m1k));
+      if (four_k) {
+        memset(emu_mem_m4k, 0, sizeof(emu_mem_m4k));
+        memcpy(emu_mem_m4k, kMifare1KDumpData, sizeof(kMifare1KDumpData));
+        const uint8_t trailer[16] = {
+          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x07,
+          0x80, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        };
+        for (size_t off = 1024; off < 2048; off += 64) {
+          memcpy(emu_mem_m4k + off + 48, trailer, sizeof(trailer));
+        }
+        for (size_t off = 2048; off < sizeof(emu_mem_m4k); off += 256) {
+          memcpy(emu_mem_m4k + off + 240, trailer, sizeof(trailer));
+        }
+      }
+    }
     uint8_t m1k_uid[4] = {kEmuUID[0], kEmuUID[1], kEmuUID[2], kEmuUID[3]};
-    if (custom_m1k) {
-      memcpy(m1k_uid, emu_mem_m1k, 4);
+    if (four_k ? custom_m4k : custom_m1k) {
+      memcpy(m1k_uid, memory, 4);
     }
     m5::nfc::a::PICC picc{};
-    if (!picc.emulate(m5::nfc::a::Type::MIFARE_Classic_1K, m1k_uid, 4)) {
+    if (!picc.emulate(four_k ? m5::nfc::a::Type::MIFARE_Classic_4K : m5::nfc::a::Type::MIFARE_Classic_1K, m1k_uid, 4)) {
       Serial.println("[M1K-DBG] picc.emulate failed"); cfg.emulation = false; unit.config(cfg); units.begin(); return false;
     }
-    // Ensure en=1 BEFORE beginM1K so goto_idle() doesn't loop back to goto_off()
-    unit.set_bit_register8(static_cast<uint8_t>(0xAA), static_cast<uint8_t>(0x03));
-    if (!emu_m1k.beginM1K(picc, emu_mem_m1k, sizeof(emu_mem_m1k))) {
+    Serial.printf("[M1K-DBG] PICC uid=%02X%02X%02X%02X atqa=%04X sak=%02X\n",
+                  m1k_uid[0], m1k_uid[1], m1k_uid[2], m1k_uid[3], picc.atqa, picc.sak);
+    // Keep the exact register-bit sequence used by the proven StickS3 path.
+    // Read/modify/write through the typed helpers is not equivalent here: the
+    // emulation layer changes these registers while entering goto_idle().
+    Serial.printf("[M1K-DBG] pre-enable=%d\n", static_cast<int>(unit.setRegisterBits(0xAA, 0x03)));
+    const bool layer_ok = emu_m1k.beginM1K(picc, memory, memory_size);
+    Serial.printf("[M1K-DBG] layer.begin=%d state=%d\n", static_cast<int>(layer_ok), static_cast<int>(emu_m1k.state()));
+    if (!layer_ok) {
       cfg.emulation = false; unit.config(cfg); units.begin(); return false;
     }
-    // Safety net: goto_off() may have cleared en|rx_en. Re-enable chip.
-    unit.set_bit_register8(static_cast<uint8_t>(0x0A), static_cast<uint8_t>(0x80));
-    unit.set_bit_register8(static_cast<uint8_t>(0xAA), static_cast<uint8_t>(0x03));
+    // Safety net: goto_off() may have cleared en|rx_en. Re-enable chip using
+    // atomic set-bit commands, matching the working StickS3 implementation.
+    unit.setRegisterBits(0x0A, 0x80);
+    unit.setRegisterBits(0xAA, 0x03);
     unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_CLEAR_FIFO);
     unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_UNMASK_RECEIVE_DATA);
     unit.writeDirectCommand(m5::unit::st25r3916::command::CMD_GO_TO_SENSE);
@@ -784,6 +833,9 @@ struct GroveNFC::NfcUnitBridge {
     is_emulating = true; emu_is_m1k = true;
     return true;
   }
+
+  bool beginEmulationMifare1K() { return beginEmulationMifare(false); }
+  bool beginEmulationMifare4K() { return beginEmulationMifare(true); }
 
   // Stop emulation and return to reader mode.
   void stopEmulation() {
@@ -902,12 +954,14 @@ constexpr uint16_t kTagAddrNtag213 = 0x0000;
 constexpr uint16_t kTagAddrNtag215 = 0x1000;
 constexpr uint16_t kTagAddrNtag216 = 0x2000;
 constexpr uint16_t kTagAddrMifare1k = 0x3000;
+constexpr uint16_t kTagAddrMifare4k = 0x5000;
 constexpr uint16_t kTagAddr14B = 0x4000;  // dedicated address, avoids conflict with kTagAddrNtag213
 constexpr uint16_t kTagAddrISO15 = 0x7000;
 constexpr size_t kNtag213ImageSize = 180;
 constexpr size_t kNtag215ImageSize = 540;
 constexpr size_t kNtag216ImageSize = 924;
 constexpr size_t kMifare1kImageSize = 1024;
+constexpr size_t kMifare4kImageSize = 4096;
 constexpr size_t kISO14BImageSize = 4;   // PUPI is 4 bytes
 constexpr size_t kISO15ImageSize = 256;
 
@@ -981,17 +1035,27 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
   if (substate == SubState::AuthSent && rx_len >= 8) {
     substate = SubState::Normal;
     const auto& picc = emulatePICC();
-    uint32_t uid32; memcpy(&uid32, picc.uid, 4);
+    const uint32_t uid32 = (uint32_t(picc.uid[0]) << 24) | (uint32_t(picc.uid[1]) << 16) |
+                           (uint32_t(picc.uid[2]) << 8) | uint32_t(picc.uid[3]);
     _crypto.init(0xFFFFFFFFFFFFULL);
     _crypto.step32(uid32 ^ nt_tag, false);
-    uint32_t nr_enc, ar_enc;
-    memcpy(&nr_enc, rx, 4); memcpy(&ar_enc, rx + 4, 4);
+    const uint32_t nr_enc = (uint32_t(rx[0]) << 24) | (uint32_t(rx[1]) << 16) |
+                            (uint32_t(rx[2]) << 8) | uint32_t(rx[3]);
+    const uint32_t ar_enc = (uint32_t(rx[4]) << 24) | (uint32_t(rx[5]) << 16) |
+                            (uint32_t(rx[6]) << 8) | uint32_t(rx[7]);
     uint32_t nr = nr_enc ^ _crypto.step32(nr_enc, true);
-    (void)(ar_enc ^ _crypto.step32(ar_enc, true));
-    m5::utility::FibonacciLFSR_Right<32, 16, 14, 13, 11> lfsr(nr);
+    const uint32_t ar = ar_enc ^ _crypto.step32(ar_enc, true);
+    const uint32_t nr_suc = (nr >> 24) | ((nr >> 8) & 0x0000FF00u) |
+                            ((nr << 8) & 0x00FF0000u) | (nr << 24);
+    m5::utility::FibonacciLFSR_Right<32, 16, 14, 13, 11> lfsr(nr_suc);
     lfsr.next32(); lfsr.next32();
-    uint32_t at = lfsr.next32();
-    uint8_t tx[4]; encrypt32(tx, at);
+    (void)ar;
+    const uint32_t at = lfsr.next32();
+    uint8_t tx[4];
+    for (uint8_t i = 0; i < 4; ++i) {
+      const uint8_t plain = static_cast<uint8_t>(at >> (i * 8));
+      tx[i] = _crypto.step8(0) ^ plain;
+    }
     return unit().nfcaEmulationTransmit(tx, 4) ? M1kState::Active : M1kState::Idle;
   }
 
@@ -1021,7 +1085,7 @@ M1kState MifareClassicEmuA::receive_callback(const uint8_t* rx, const uint32_t r
       if (rx_len == 2) {
         nt_tag = esp_random();
         uint8_t nt[4];
-        nt[0] = nt_tag; nt[1] = nt_tag >> 8; nt[2] = nt_tag >> 16; nt[3] = nt_tag >> 24;
+        nt[0] = nt_tag >> 24; nt[1] = nt_tag >> 16; nt[2] = nt_tag >> 8; nt[3] = nt_tag;
         substate = SubState::AuthSent;
         return unit().nfcaEmulationTransmit(nt, 4) ? M1kState::Active : M1kState::Idle;
       }
@@ -1048,6 +1112,9 @@ GroveNFC::~GroveNFC() {
 }
 
 bool GroveNFC::begin() {
+  // Vendor MFC loaders use 64-byte writes for 1K and 256-byte writes for the
+  // large 4K sectors. Reserve enough ESP32 Wire TX space for register bytes.
+  wire_.setBufferSize(300);
   if (!detectAddress()) return false;
 
   if (is_nfc_unit_) {
@@ -1200,6 +1267,15 @@ bool GroveNFC::startNfcUnitEmulationMifare1K() {
 #endif
 }
 
+bool GroveNFC::startNfcUnitEmulationMifare4K() {
+#if GROVENFC_HAS_M5UNIT_BACKEND
+  if (!nfc_unit_bridge_) return false;
+  return nfc_unit_bridge_->beginEmulationMifare4K();
+#else
+  return false;
+#endif
+}
+
 bool GroveNFC::startNfcUnitEmulationFelica() {
 #if GROVENFC_HAS_M5UNIT_BACKEND
   if (!nfc_unit_bridge_) return false;
@@ -1233,6 +1309,13 @@ void GroveNFC::tickNfcUnitEmulation() {
     nfc_unit_bridge_->emu_f.update();
   else
     nfc_unit_bridge_->emu_a.update();
+  if (!nfc_unit_bridge_->emu_is_felica && !nfc_unit_bridge_->emu_is_m1k) {
+    const int8_t state = static_cast<int8_t>(nfc_unit_bridge_->emu_a.state());
+    if (state != nfc_unit_bridge_->last_logged_emu_state) {
+      nfc_unit_bridge_->last_logged_emu_state = state;
+      Serial.printf("[EMU-A] state=%d\n", static_cast<int>(state));
+    }
+  }
 #endif
 }
 
@@ -1334,6 +1417,7 @@ bool GroveNFC::setSlot(uint8_t slot) {
 
 void GroveNFC::clearCustomDumpFlags() {
   custom_dump_mifare1k_ = false;
+  custom_dump_mifare4k_ = false;
   custom_dump_ntag213_ = false;
   custom_dump_ntag215_ = false;
   custom_dump_ntag216_ = false;
@@ -1345,24 +1429,47 @@ void GroveNFC::clearCustomDumpFlags() {
 bool GroveNFC::writeEepromImage(uint16_t tag_addr, const uint8_t* data, size_t len) {
   if (!data || len == 0 || len > 0xFFFFu) return false;
 
-  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
-  delay(2);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, tag_addr);
-  delay(2);
+  const bool mifare1k = tag_addr == kTagAddrMifare1k;
+  const bool mifare4k = tag_addr == kTagAddrMifare4k;
+  const bool mifare = mifare1k || mifare4k;
+  const uint32_t settle_ms = mifare ? 10 : 2;
+  if (!writeSysReg(I2cSysReg_SetMode_Addr,
+                   SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+  delay(settle_ms);
+  if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, tag_addr)) return false;
+  delay(settle_ms);
 
-  constexpr size_t kChunk = 32;
+  // The module's MIFARE Classic EEPROM loader commits complete 64-byte
+  // sectors. Splitting a sector into 32-byte transactions can leave a valid
+  // looking UID in RAM while the RF frontend still exposes an invalid card.
+  // This mirrors the vendor ISO14ATagModeWriteM1 sequence exactly.
   size_t off = 0;
   while (off < len) {
-    const size_t n = min(kChunk, len - off);
-    if (!writeData(static_cast<uint16_t>(I2cEpromReg_Addr + off), data + off, static_cast<uint16_t>(n))) {
+    const size_t chunk = mifare1k ? 64 : (mifare4k ? (off < 2048 ? 64 : 256) : 32);
+    const size_t n = min(chunk, len - off);
+    const uint8_t* src = data + off;
+    uint8_t mfc_sector0[256];
+    if (mifare && off == 0) {
+      memset(mfc_sector0, 0, sizeof(mfc_sector0));
+      memcpy(mfc_sector0, data, min(n, len));
+      // GroveNFC derives the anticollision response directly from block 0.
+      // Normalize metadata just like the working StickS3 MFC1K profile:
+      // 4-byte UID, valid BCC, SAK 08 and ATQA 0004 (stored little-endian).
+      mfc_sector0[4] = mfc_sector0[0] ^ mfc_sector0[1] ^ mfc_sector0[2] ^ mfc_sector0[3];
+      mfc_sector0[5] = mifare1k ? 0x08 : 0x18;
+      mfc_sector0[6] = mifare1k ? 0x04 : 0x02;
+      mfc_sector0[7] = 0x00;
+      src = mfc_sector0;
+    }
+    if (!writeData(static_cast<uint16_t>(I2cEpromReg_Addr + off), src, static_cast<uint16_t>(n))) {
       return false;
     }
     off += n;
-    delay(2);
+    delay(settle_ms);
   }
 
   if (!writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE)) return false;
-  delay(320);
+  delay(mifare ? 500 : 320);
   return true;
 }
 
@@ -1376,6 +1483,7 @@ bool GroveNFC::uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t
     if (!ok) return false;
     switch (type) {
       case DumpTagType::Mifare1K: custom_dump_mifare1k_ = true; break;
+      case DumpTagType::Mifare4K: return false;
       case DumpTagType::Ntag213: custom_dump_ntag213_ = true; break;
       case DumpTagType::Ntag215: custom_dump_ntag215_ = true; break;
       case DumpTagType::Ntag216: custom_dump_ntag216_ = true; break;
@@ -1393,6 +1501,10 @@ bool GroveNFC::uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t
     case DumpTagType::Mifare1K:
       ok = writeEepromImage(kTagAddrMifare1k, data, min(len, kMifare1kImageSize));
       custom_dump_mifare1k_ = ok;
+      break;
+    case DumpTagType::Mifare4K:
+      ok = writeEepromImage(kTagAddrMifare4k, data, min(len, kMifare4kImageSize));
+      custom_dump_mifare4k_ = ok;
       break;
     case DumpTagType::Ntag213:
       ok = writeEepromImage(kTagAddrNtag213, data, min(len, kNtag213ImageSize));
@@ -1436,12 +1548,40 @@ bool GroveNFC::startEmulationMifare1K() {
   if (!custom_dump_mifare1k_) {
     if (!writeMifare1KImage()) return false;
   }
-  stopRF();
-  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
-  delay(5);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k);
-  delay(5);
-  return writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_MIFARE1_4B1K);
+  if (!writeSysReg(I2cSysReg_SetMode_Addr,
+                   SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+  delay(10);
+  if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k)) return false;
+  delay(10);
+  const uint16_t expected_mode = SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_MIFARE1_4B1K;
+  if (!writeSysReg(I2cSysReg_SetMode_Addr, expected_mode)) return false;
+  delay(10);
+  const uint16_t mode_back = readSysReg(I2cSysReg_SetMode_Addr);
+  const uint16_t addr_back = readSysReg(I2cSysReg_SetTagAddr_Addr);
+  Serial.printf("[EMU-MFC1K] mode=0x%04X addr=0x%04X expected=0x%04X/0x%04X\n",
+                mode_back, addr_back, expected_mode, kTagAddrMifare1k);
+  // The Grove firmware's mode register is write-mostly on some revisions;
+  // a zero readback does not mean the tag mode write failed. The reference
+  // firmware treats the successful I2C write as the start result.
+  return true;
+}
+
+bool GroveNFC::startEmulationMifare4K() {
+  if (is_nfc_unit_) return false;
+  if (!custom_dump_mifare4k_ && !writeMifare4KImage()) return false;
+  if (!writeSysReg(I2cSysReg_SetMode_Addr,
+                   SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+  delay(10);
+  if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare4k)) return false;
+  delay(10);
+  const uint16_t expected_mode = SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_MIFARE1_4B4K;
+  if (!writeSysReg(I2cSysReg_SetMode_Addr, expected_mode)) return false;
+  delay(10);
+  const uint16_t mode_back = readSysReg(I2cSysReg_SetMode_Addr);
+  const uint16_t addr_back = readSysReg(I2cSysReg_SetTagAddr_Addr);
+  Serial.printf("[EMU-MFC4K] mode=0x%04X addr=0x%04X expected=0x%04X/0x%04X\n",
+                mode_back, addr_back, expected_mode, kTagAddrMifare4k);
+  return true;
 }
 
 bool GroveNFC::startEmulationNtag213() {
@@ -2122,12 +2262,27 @@ bool GroveNFC::readISO15(CardInfo& card) {
   uint8_t rx[64] = {0};
   uint16_t rx_len = sizeof(rx);
   uint8_t inv[] = {0x26, 0x01, 0x00};
-  if (!txrx(inv, sizeof(inv), rx, rx_len, 15) || rx_len < 10) {
-    // Some ISO15693 cards answer slower; retry once with a longer wait window.
+  bool got_inventory = txrx(inv, sizeof(inv), rx, rx_len, 30) && rx_len >= 10;
+  if (!got_inventory) {
+    // Older GroveNFC firmware can retain the previous protocol's RF state
+    // after an A/B scan. A complete RF edge is required before ISO15693
+    // inventory; merely writing RFON again is not sufficient.
+    writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_OFF);
+    delay(8);
     writeMiscReg(I2cMiscReg_SetRFOn_Addr, MISC_REG_RFON_ON);
-    delay(4);
+    delay(8);
     rx_len = sizeof(rx);
-    if (!txrx(inv, sizeof(inv), rx, rx_len, 100) || rx_len < 10) return false;
+    got_inventory = txrx(inv, sizeof(inv), rx, rx_len, 120) && rx_len >= 10;
+  }
+  if (!got_inventory) {
+    // A few ISO15693 readers only respond without the high-data-rate flag.
+    const uint8_t inv_26k[] = {0x06, 0x01, 0x00};
+    rx_len = sizeof(rx);
+    got_inventory = txrx(inv_26k, sizeof(inv_26k), rx, rx_len, 120) && rx_len >= 10;
+  }
+  if (!got_inventory) {
+    Serial.println("[ISO15] inventory timeout");
+    return false;
   }
 
   card.protocol = "ISO15693";
@@ -2366,24 +2521,54 @@ bool GroveNFC::writeMifare1KImage() {
   header[3] = applyLowNibbleSlot(header[3], slot_index_);
   header[4] = header[0] ^ header[1] ^ header[2] ^ header[3];
 
-  writeSysReg(I2cSysReg_SetMode_Addr, SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE);
-  delay(2);
-  writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k);
-  delay(2);
+  if (!writeSysReg(I2cSysReg_SetMode_Addr,
+                   SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+  delay(10);
+  if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare1k)) return false;
+  delay(10);
 
-  constexpr size_t kChunk = 32;
-  for (size_t off = 0; off < sizeof(header); off += kChunk) {
-    const size_t n = min(kChunk, sizeof(header) - off);
-    if (!writeData(I2cEpromReg_Addr + off, header + off, n)) return false;
-    delay(2);
-  }
+  if (!writeData(I2cEpromReg_Addr, header, sizeof(header))) return false;
+  delay(10);
   for (uint16_t sector = 1; sector < 16; ++sector) {
     const uint16_t base = I2cEpromReg_Addr + (sector << 6);
-    for (size_t off = 0; off < sizeof(kMifareOne1KData); off += kChunk) {
-      const size_t n = min(kChunk, sizeof(kMifareOne1KData) - off);
-      if (!writeData(base + off, kMifareOne1KData + off, n)) return false;
-      delay(2);
-    }
+    if (!writeData(base, kMifareOne1KData, sizeof(kMifareOne1KData))) return false;
+    delay(10);
+  }
+  if (!writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE)) return false;
+  delay(500);
+  return true;
+}
+
+bool GroveNFC::writeMifare4KImage() {
+  uint8_t header[sizeof(kMifareOne4B1KHeader)] = {0};
+  memcpy(header, kMifareOne4B1KHeader, sizeof(header));
+  header[3] = applyLowNibbleSlot(header[3], slot_index_);
+  header[4] = header[0] ^ header[1] ^ header[2] ^ header[3];
+  header[5] = 0x18;  // MIFARE Classic 4K SAK
+  header[6] = 0x02;  // ATQA 0x0200, stored little-endian
+  header[7] = 0x00;
+
+  if (!writeSysReg(I2cSysReg_SetMode_Addr,
+                   SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;
+  delay(10);
+  if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare4k)) return false;
+  delay(10);
+  if (!writeData(I2cEpromReg_Addr, header, sizeof(header))) return false;
+  delay(10);
+
+  for (uint16_t sector = 1; sector < 32; ++sector) {
+    if (!writeData(I2cEpromReg_Addr + (sector << 6),
+                   kMifareOne1KData, sizeof(kMifareOne1KData))) return false;
+    delay(10);
+  }
+
+  uint8_t large_sector[256] = {0};
+  memcpy(large_sector + sizeof(large_sector) - sizeof(kMifareOne1KData) / 4,
+         kMifareOne1KData + 48, 16);
+  for (uint16_t sector = 32; sector < 40; ++sector) {
+    const uint16_t addr = I2cEpromReg_Addr + 2048 + ((sector - 32) << 8);
+    if (!writeData(addr, large_sector, sizeof(large_sector))) return false;
+    delay(10);
   }
   if (!writeMiscReg(I2cMiscReg_SetEpWrite_Addr, MISC_REG_EPWRITE_WRITE)) return false;
   delay(500);

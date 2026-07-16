@@ -37,6 +37,7 @@ constexpr uint16_t SYS_REG_MODE_TAG_NTAG213 = 0x0001;
 constexpr uint16_t SYS_REG_MODE_TAG_NTAG215 = 0x0002;
 constexpr uint16_t SYS_REG_MODE_TAG_NTAG216 = 0x0003;
 constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B1K = 0x0004;
+constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B4K = 0x0006;
 constexpr uint16_t SYS_REG_MODE_TAGIT_HF_I_Plus = 0x000C;
 constexpr uint16_t SYS_REG_MODE_TAG_CHINA_II = 0x0020;
 
@@ -85,6 +86,7 @@ struct CardInfo {
 
 enum class DumpTagType : uint8_t {
   Mifare1K = 0,
+  Mifare4K,
   Ntag213,
   Ntag215,
   Ntag216,
@@ -107,6 +109,7 @@ class GroveNFC {
   bool recover();
   bool setSlot(uint8_t slot);
   bool startEmulationMifare1K();
+  bool startEmulationMifare4K();
   bool startEmulationNtag213();
   bool startEmulationNtag215();
   bool startEmulationNtag216();
@@ -118,6 +121,7 @@ class GroveNFC {
   bool loadMifare1KDump(const uint8_t* data, size_t len);
   bool autoStartMifare1K();
   bool startNfcUnitEmulationMifare1K();
+  bool startNfcUnitEmulationMifare4K();
   bool startNfcUnitEmulationFelica();
   void stopNfcUnitEmulation();
   bool isNfcUnitEmulating() const;
@@ -152,6 +156,7 @@ class GroveNFC {
 
   String bytesToHex(const uint8_t* data, size_t len, bool reverse = false);
   bool writeMifare1KImage();
+  bool writeMifare4KImage();
   void writeNtag213Image();
   void writeNtag215Image();
   void writeNtag216Image();
@@ -169,6 +174,7 @@ class GroveNFC {
 
   uint8_t slot_index_ = 0;
   bool custom_dump_mifare1k_ = false;
+  bool custom_dump_mifare4k_ = false;
   bool custom_dump_ntag213_ = false;
   bool custom_dump_ntag215_ = false;
   bool custom_dump_ntag216_ = false;

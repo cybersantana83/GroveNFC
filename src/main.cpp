@@ -1,4 +1,10 @@
+#ifdef APP_TARGET_M5PAPER
+// M5Paper: use M5Unified which has built-in IT8951 e-ink panel support via LovyanGFX
 #include <M5Unified.h>
+#include "M5Paper_Config.h"
+#else
+#include <M5Unified.h>
+#endif
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
 #include <M5Cardputer.h>
 #endif
@@ -30,6 +36,10 @@ constexpr uint8_t kEmuMenuVisibleCount = 5;
 constexpr int kSdaPin = 32;
 constexpr int kSclPin = 33;
 constexpr uint8_t kEmuMenuVisibleCount = 5;
+#elif defined(APP_TARGET_M5PAPER)
+constexpr int kSdaPin = 25;
+constexpr int kSclPin = 32;
+constexpr uint8_t kEmuMenuVisibleCount = 5;
 #else
 constexpr int kSdaPin = 2;
 constexpr int kSclPin = 1;
@@ -42,6 +52,8 @@ constexpr uint32_t kPollIntervalMs = 120;
 constexpr uint32_t kPollIntervalMs = 120;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kPollIntervalMs = 140;
+#elif defined(APP_TARGET_M5PAPER)
+constexpr uint32_t kPollIntervalMs = 280;
 #else
 constexpr uint32_t kPollIntervalMs = 220;
 #endif
@@ -51,6 +63,8 @@ constexpr uint32_t kReaderHoldCheckMs = 650;
 constexpr uint32_t kReaderHoldCheckMs = 650;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kReaderHoldCheckMs = 700;
+#elif defined(APP_TARGET_M5PAPER)
+constexpr uint32_t kReaderHoldCheckMs = 1000;
 #else
 constexpr uint32_t kReaderHoldCheckMs = 900;
 #endif
@@ -63,16 +77,28 @@ constexpr uint32_t kNdefAutoPollMs = 520;
 constexpr uint32_t kNdefAutoPollMs = 520;
 #elif defined(APP_TARGET_STICKCPLUS)
 constexpr uint32_t kNdefAutoPollMs = 650;
+#elif defined(APP_TARGET_M5PAPER)
+constexpr uint32_t kNdefAutoPollMs = 1200;
 #else
 constexpr uint32_t kNdefAutoPollMs = 900;
 #endif
+#if defined(APP_TARGET_M5PAPER)
+constexpr uint32_t kReaderRecoverMs = 8000;
+#else
 constexpr uint32_t kReaderRecoverMs = 6000;
+#endif
 constexpr uint32_t kRecoverCooldownMs = 1500;
 constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
 constexpr uint32_t kReaderAnimStepUs = 8000;
 constexpr uint32_t kReaderSweepUs = 820000;
-constexpr bool kAutoBootDebug = true;
+constexpr bool kAutoBootDebug =
+#if defined(APP_TARGET_M5PAPER)
+  false
+#else
+  true
+#endif
+;
 constexpr uint32_t kBootDebugShowMs = 2500;
 constexpr uint8_t kSpeakerVolume = 160;
 constexpr uint8_t kEmuActionCount = 2;
@@ -92,6 +118,11 @@ constexpr uint8_t kNfcBootRetryCount = 5;
 constexpr uint32_t kNfcBootRetryDelayMs = 140;
 #elif defined(APP_TARGET_STICKS3)
 constexpr uint32_t kHoldPressMs = 380;
+constexpr uint32_t kNfcBootPowerSettleMs = 220;
+constexpr uint8_t kNfcBootRetryCount = 5;
+constexpr uint32_t kNfcBootRetryDelayMs = 140;
+#elif defined(APP_TARGET_M5PAPER)
+constexpr uint32_t kHoldPressMs = 500;
 constexpr uint32_t kNfcBootPowerSettleMs = 220;
 constexpr uint8_t kNfcBootRetryCount = 5;
 constexpr uint32_t kNfcBootRetryDelayMs = 140;
@@ -115,6 +146,7 @@ enum class MenuPage : uint8_t {
 
 enum class EmuType : uint8_t {
   MF1K = 0,
+  MF4K,
   N213,
   N215,
   N216,
@@ -156,12 +188,61 @@ int active_scl_pin = kSclPin;
 // Off-screen canvas for flicker-free rendering (all drawing targets this sprite, then a
 // single pushSprite() DMA-blits the complete frame to the physical display).
 LGFX_Sprite g_canvas;
-MenuPage menu_page = MenuPage::Reader;
-EmuType emu_type = EmuType::MF1K;
-EmuType emu_menu_type = EmuType::MF1K;
-EmuConfigStage emu_config_stage = EmuConfigStage::None;
 bool in_home = true;
-int home_index = 0;
+#ifdef APP_TARGET_M5PAPER
+// E-ink refresh state
+static bool s_epd_ready = false;
+static int g_eink_partial_count = 0;
+static uint32_t g_last_eink_full_ms = 0;
+constexpr uint32_t kEinkMinFullIntervalMs = 60000;
+
+static void drawM5PaperStatusBar() {
+  const int w = g_canvas.width();
+  const int bar_h = kStatusBarHeight;
+  const int32_t battery = M5.Power.getBatteryLevel();
+
+  g_canvas.fillRect(0, 0, w, bar_h, TFT_WHITE);
+  g_canvas.drawLine(0, bar_h - 1, w, bar_h - 1, TFT_BLACK);
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setTextSize(2);
+  const int text_y = (bar_h - g_canvas.fontHeight()) / 2;
+  g_canvas.setCursor(12, text_y);
+  g_canvas.print(in_home ? "GroveNFC" : "< Back");
+  if (!in_home) {
+    const String brand = "GroveNFC";
+    const int brand_w = g_canvas.textWidth(brand);
+    g_canvas.setCursor((w - brand_w) / 2, text_y);
+    g_canvas.print(brand);
+  }
+
+  const int battery_w = 34;
+  const int battery_h = 18;
+  const int battery_x = w - battery_w - 18;
+  const int battery_y = (bar_h - battery_h) / 2;
+  g_canvas.drawRect(battery_x, battery_y, battery_w, battery_h, TFT_BLACK);
+  g_canvas.fillRect(battery_x + battery_w, battery_y + 5, 3, 6, TFT_BLACK);
+  if (battery >= 0) {
+    const int fill_w = ((battery_w - 4) * constrain(battery, 0, 100)) / 100;
+    if (fill_w > 0) g_canvas.fillRect(battery_x + 2, battery_y + 2, fill_w, battery_h - 4, TFT_BLACK);
+  }
+}
+
+// Push canvas to M5Paper e-ink display via M5Unified's LovyanGFX IT8951 driver
+// Mirrors the minimal test that is confirmed to work: pushSprite then display().
+static void pushCanvasToEink(bool force_full = false) {
+  if (!s_epd_ready) return;
+  drawM5PaperStatusBar();
+  g_canvas.pushSprite(&M5.Display, 0, 0);
+  M5.Display.display();
+}
+#endif
+
+MenuPage menu_page = MenuPage::Reader;
+EmuType emu_type = EmuType::N213;
+EmuType emu_menu_type = EmuType::N213;
+EmuConfigStage emu_config_stage = EmuConfigStage::None;
+int home_index = -1;
 int emu_menu_index = 0;
 uint8_t emu_type_cursor = 0;
 uint8_t emu_type_scroll = 0;
@@ -169,6 +250,7 @@ grove_nfc::CardInfo last_card;
 uint32_t last_poll_ms = 0;
 bool nfc_ready = false;
 bool emu_started = false;
+bool emu_user_stopped = false;
 uint32_t emu_last_start_retry_ms = 0;
 String diagnose_report;
 bool diagnose_ok = false;
@@ -245,6 +327,8 @@ String emu_ap_last_upload_path;
 String dumps_qr_payload;
 bool dumps_qr_wifi = true;
 bool dumps_emu_popup_active = false;
+bool m5paper_dump_actions = false;
+bool m5paper_dump_delete_confirm = false;
 uint32_t dumps_emu_popup_until_ms = 0;
 String dumps_emu_popup_line1;
 String dumps_emu_popup_line2;
@@ -342,15 +426,27 @@ EmuType nfc_w_emu_type = EmuType::N213;
 PianoStage nfc_w_piano_stage = PianoStage::Menu;
 
 inline bool mainButtonClicked() {
+#ifdef APP_TARGET_M5PAPER
+  return M5.BtnB.wasClicked();
+#else
   return M5.BtnA.wasClicked();
+#endif
 }
 
 inline bool mainButtonPressedFor(uint32_t ms) {
+#ifdef APP_TARGET_M5PAPER
+  return M5.BtnB.pressedFor(ms);
+#else
   return M5.BtnA.pressedFor(ms);
+#endif
 }
 
 inline bool mainButtonReleased() {
+#ifdef APP_TARGET_M5PAPER
+  return M5.BtnB.wasReleased();
+#else
   return M5.BtnA.wasReleased();
+#endif
 }
 
 struct KeyNavState {
@@ -456,6 +552,14 @@ KeyNavState readKeyNavState() {
 
   return nav;
 }
+#elif defined(APP_TARGET_M5PAPER)
+KeyNavState readKeyNavState() {
+  KeyNavState nav;
+  if (M5.BtnC.wasClicked())    nav.prev = true;
+  if (M5.BtnA.wasClicked())    nav.next = true;
+  if (M5.BtnC.pressedFor(kHoldPressMs)) { nav.back = true; nav.cancel = true; }
+  return nav;
+}
 #else
 KeyNavState readKeyNavState() {
   static bool b_down = false;
@@ -553,13 +657,13 @@ static void setSpeaker5V(bool enable) {
 }
 
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
-const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano};
+const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
 // Keep the same accent palette for both GroveNFC and Unit NFC to avoid UI mismatch.
 
 inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
 inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
   if (isNfcUnitMode()) {
-    return type == EmuType::MF1K || type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
+    return type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
   }
   // Grove module does not support Felica card emulation.
   return type != EmuType::Felica;
@@ -644,10 +748,273 @@ const char* pageName(MenuPage page) {
   }
 }
 
+#ifdef APP_TARGET_M5PAPER
+void enterCurrentFeature();
+void drawScreen(bool popup_only = false);
+void goHome();
+void startCurrentEmulation();
+void switchEmuType(int8_t dir);
+void selectEmuType(EmuType type);
+void stopAllModes();
+void refreshDumpFiles(bool filter_by_current_type);
+bool loadDumpIntoEmulator(const String& path);
+String buildDumpPreview(const String& path);
+String dumpTypeLabel(const String& path);
+bool mapTypeHintToEmuType(String hint, EmuType& out);
+String loadLastDumpForType(EmuType type);
+void saveLastDumpForType(EmuType type, const String& path);
+
+struct M5PaperHomeTile {
+  int x;
+  int y;
+  int w;
+  int h;
+  int icon_cx;
+  int icon_cy;
+};
+
+static M5PaperHomeTile getM5PaperHomeTile(int index, int screen_w, int screen_h) {
+  const int status_h = kStatusBarHeight;
+  const int margin_x = 14;
+  const int margin_top = 12;
+  const int margin_bottom = 18;
+  const int gap_x = 12;
+  const int gap_y = 14;
+  const int cols = 2;
+  const int count = homePageCount();
+  const int rows = max(1, (count + cols - 1) / cols);
+  const int grid_x = margin_x;
+  const int grid_y = status_h + margin_top;
+  const int grid_w = screen_w - margin_x * 2;
+  const int grid_h = screen_h - grid_y - margin_bottom;
+  const int cell_w = (grid_w - gap_x) / cols;
+  const int cell_h = (grid_h - gap_y * (rows - 1)) / rows;
+  const int row = index / cols;
+  const int col = index % cols;
+
+  M5PaperHomeTile tile{};
+  tile.x = grid_x + col * (cell_w + gap_x);
+  tile.y = grid_y + row * (cell_h + gap_y);
+  tile.w = cell_w;
+  tile.h = cell_h;
+  tile.icon_cx = tile.x + tile.w / 2;
+  tile.icon_cy = tile.y + tile.h / 2 - 18;
+  return tile;
+}
+
+static int findM5PaperHomeTileIndex(int x, int y) {
+  const int count = homePageCount();
+  const int screen_w = M5.Display.width();
+  const int screen_h = M5.Display.height();
+  for (int i = 0; i < count; ++i) {
+    const auto tile = getM5PaperHomeTile(i, screen_w, screen_h);
+    if (x >= tile.x && x < tile.x + tile.w && y >= tile.y && y < tile.y + tile.h) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static bool handleM5PaperHomeTouch() {
+  if (!in_home || M5.Touch.getCount() == 0) return false;
+
+  const auto touch = M5.Touch.getDetail();
+  const int tile_index = findM5PaperHomeTileIndex(touch.x, touch.y);
+  if (tile_index < 0) return false;
+
+  if (touch.wasClicked()) {
+    home_index = tile_index;
+    menu_page = homePageAt(home_index);
+    enterCurrentFeature();
+    return true;
+  }
+
+  return false;
+}
+
+static bool handleM5PaperStatusTouch() {
+  if (in_home || M5.Touch.getCount() == 0) return false;
+  const auto touch = M5.Touch.getDetail();
+  if (touch.wasClicked() && touch.y < kStatusBarHeight && touch.x < 150) {
+    if (menu_page == MenuPage::WebFiles && dumps_stage == DumpsStage::Preview) {
+      dumps_stage = DumpsStage::Browse;
+      m5paper_dump_actions = false;
+      drawScreen();
+    } else if (menu_page == MenuPage::WebFiles && dumps_pick_for_emu) {
+      dumps_pick_for_emu = false;
+      menu_page = MenuPage::Emulator;
+      drawScreen();
+    } else {
+      goHome();
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool m5PaperHit(const m5::touch_detail_t& t, int x, int y, int w, int h) {
+  return t.x >= x && t.x < x + w && t.y >= y && t.y < y + h;
+}
+
+static bool handleM5PaperFeatureTouch() {
+  if (in_home || M5.Touch.getCount() == 0) return false;
+  const auto touch = M5.Touch.getDetail();
+  if (!touch.wasClicked()) return false;
+  const int w = M5.Display.width();
+
+  if (menu_page == MenuPage::Reader) {
+    if (m5PaperHit(touch, 24, 820, w - 48, 88)) {
+      last_card.valid = false;
+      last_card.protocol = "None";
+      last_card.uid = "";
+      last_card.detail = "Scanning now...";
+      last_poll_ms = 0;
+      drawScreen();
+      return true;
+    }
+  } else if (menu_page == MenuPage::Emulator) {
+    constexpr int grid_x = 24, grid_y = 174, cell_w = 117, cell_h = 76, gap = 8;
+    for (uint8_t i = 0; i < static_cast<uint8_t>(EmuType::Count); ++i) {
+      const int col = i % 4, row = i / 4;
+      if (m5PaperHit(touch, grid_x + col * (cell_w + gap),
+                     grid_y + row * (cell_h + gap), cell_w, cell_h)) {
+        const EmuType selected = static_cast<EmuType>(i);
+        if (isEmuTypeSupportedCurrentMode(selected)) selectEmuType(selected);
+        return true;
+      }
+    }
+    if (m5PaperHit(touch, 354, 384, 144, 64)) {
+      dumps_pick_for_emu = true;
+      dumps_stage = DumpsStage::Browse;
+      dump_file_index = 0;
+      menu_page = MenuPage::WebFiles;
+      refreshDumpFiles(true);
+      drawScreen();
+      return true;
+    }
+  } else if (menu_page == MenuPage::WebFiles && dumps_stage == DumpsStage::Browse) {
+    if (m5paper_dump_delete_confirm) {
+      if (m5PaperHit(touch, 70, 620, 180, 86)) {
+        if (dump_file_index < emu_dump_count) {
+          const String deleted_path = emu_dump_files[dump_file_index];
+          LittleFS.remove(deleted_path);
+          for (uint8_t i = 0; i < static_cast<uint8_t>(EmuType::Count); ++i) {
+            if (emu_dump_loaded_path[i] == deleted_path || loadLastDumpForType(static_cast<EmuType>(i)) == deleted_path) {
+              emu_dump_loaded_path[i] = "";
+              emu_dump_loaded_uid[i] = "";
+              saveLastDumpForType(static_cast<EmuType>(i), "");
+            }
+          }
+        }
+        m5paper_dump_delete_confirm = false;
+        m5paper_dump_actions = false;
+        refreshDumpFiles(false);
+        drawScreen();
+        return true;
+      }
+      if (m5PaperHit(touch, 290, 620, 180, 86)) {
+        m5paper_dump_delete_confirm = false;
+        drawScreen();
+        return true;
+      }
+      return true;
+    }
+    if (m5paper_dump_actions) {
+      if (m5PaperHit(touch, 60, 560, 420, 76)) {
+        dumps_preview_text = buildDumpPreview(emu_dump_files[dump_file_index]);
+        dumps_preview_offset = 0;
+        dumps_stage = DumpsStage::Preview;
+        m5paper_dump_actions = false;
+        drawScreen();
+        return true;
+      }
+      if (m5PaperHit(touch, 60, 650, 420, 76)) {
+        EmuType inferred = emu_type;
+        if (mapTypeHintToEmuType(dumpTypeLabel(emu_dump_files[dump_file_index]), inferred)) emu_type = inferred;
+        emu_user_stopped = false;
+        if (loadDumpIntoEmulator(emu_dump_files[dump_file_index])) {
+          menu_page = MenuPage::Emulator;
+          dumps_pick_for_emu = false;
+        }
+        m5paper_dump_actions = false;
+        drawScreen();
+        return true;
+      }
+      if (m5PaperHit(touch, 60, 740, 420, 76)) {
+        m5paper_dump_delete_confirm = true;
+        drawScreen();
+        return true;
+      }
+      if (m5PaperHit(touch, 60, 830, 420, 76)) {
+        m5paper_dump_actions = false;
+        drawScreen();
+        return true;
+      }
+      return true;
+    }
+    const int list_y = 170;
+    const int row_h = 76;
+    const int visible = 7;
+    int first = 0;
+    if (dump_file_index >= visible) first = dump_file_index - visible + 1;
+    for (int row = 0; row < visible; ++row) {
+      const int idx = first + row;
+      if (idx >= emu_dump_count) break;
+      if (m5PaperHit(touch, 20, list_y + row * row_h, w - 40, row_h - 8)) {
+        dump_file_index = static_cast<uint8_t>(idx);
+        m5paper_dump_actions = true;
+        drawScreen();
+        return true;
+      }
+    }
+  } else if (menu_page == MenuPage::WebFiles && dumps_stage == DumpsStage::Preview) {
+    constexpr size_t rows_per_page = 17;
+    size_t data_lines = 0;
+    int newline_count = 0;
+    for (size_t i = 0; i < dumps_preview_text.length(); ++i) {
+      if (dumps_preview_text[i] == '\n') {
+        ++newline_count;
+        if (newline_count > 3) ++data_lines;
+      }
+    }
+    if (data_lines > rows_per_page) {
+      dumps_preview_offset += rows_per_page;
+      if (dumps_preview_offset >= data_lines) dumps_preview_offset = 0;
+      drawScreen();
+    }
+    return true;
+  } else if (menu_page == MenuPage::Piano) {
+    if (piano_stage == PianoStage::Menu) {
+      if (m5PaperHit(touch, 24, 260, w - 48, 110)) {
+        setSpeaker5V(true);
+        piano_stage = PianoStage::Play;
+        piano_last_note = "-";
+        piano_status = "Place a mapped card to play";
+        drawScreen();
+        return true;
+      }
+      if (m5PaperHit(touch, 24, 400, w - 48, 110)) {
+        piano_stage = PianoStage::Config;
+        piano_config_step = 0;
+        for (uint8_t i = 0; i < kPianoNoteCount; ++i) piano_card_map[i] = "";
+        piano_status = String("Scan ") + kPianoNoteName[0];
+        drawScreen();
+        return true;
+      }
+    }
+  }
+  return false;
+}
+#else
+void drawScreen(bool popup_only = false);
+#endif
+
 const char* emuName(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
       return "MFC1K";
+    case EmuType::MF4K:
+      return "MFC4K";
     case EmuType::N213:
       return "NTAG213";
     case EmuType::N215:
@@ -685,6 +1052,13 @@ String shortDumpName(const String& path, size_t limit = 18) {
   if (name.length() <= limit) return name;
   if (limit <= 2) return name.substring(0, limit);
   return name.substring(0, limit - 2) + "..";
+}
+
+String dumpFileName(const String& path) {
+  const int slash = path.lastIndexOf('/');
+  return (slash >= 0 && slash + 1 < static_cast<int>(path.length()))
+             ? path.substring(static_cast<size_t>(slash + 1))
+             : path;
 }
 
 uint8_t dumpMenuCount() {
@@ -789,6 +1163,8 @@ const char* emuTypeShort(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
       return "MF1K";
+    case EmuType::MF4K:
+      return "MF4K";
     case EmuType::N213:
       return "N213";
     case EmuType::N215:
@@ -808,7 +1184,7 @@ const char* emuTypeShort(EmuType type) {
 
 String emulatorDisplayId(EmuType type, uint8_t slot) {
   String base;
-  if (type == EmuType::MF1K) {
+  if (type == EmuType::MF1K || type == EmuType::MF4K) {
     base = "6117C420";
   } else if (type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216) {
     base = "04311D01174503";
@@ -839,6 +1215,18 @@ String activeEmulatorDisplayId(EmuType type) {
   return emulatorDisplayId(type, 0);
 }
 
+void updateEmulatorSourceStatus() {
+  const uint8_t idx = static_cast<uint8_t>(emu_type);
+  if (idx < static_cast<uint8_t>(EmuType::Count) && !emu_dump_loaded_path[idx].isEmpty()) {
+    String name = emu_dump_loaded_path[idx];
+    const int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(static_cast<size_t>(slash + 1));
+    emu_dump_status = "Loaded " + name;
+  } else {
+    emu_dump_status = String("Built-in ") + emuName(emu_type) + " demo data";
+  }
+}
+
 String marqueeText(const String& text, size_t visible_chars, uint32_t speed_ms = 180) {
   if (text.length() <= visible_chars) return text;
   const size_t n = text.length();
@@ -860,9 +1248,37 @@ String marqueeText(const String& text, size_t visible_chars, uint32_t speed_ms =
   return text.substring(start, start + visible_chars);
 }
 
+static String ellipsizeCanvasText(const String& text, int max_width) {
+  if (max_width <= 0 || g_canvas.textWidth(text) <= max_width) return text;
+  const String suffix = "...";
+  String fitted = text;
+  while (!fitted.isEmpty() && g_canvas.textWidth(fitted + suffix) > max_width) {
+    fitted.remove(fitted.length() - 1);
+  }
+  return fitted + suffix;
+}
+
 String upperText(String s) {
   s.toUpperCase();
   return s;
+}
+
+String formatUidDisplay(const String& input) {
+  String hex;
+  hex.reserve(input.length());
+  for (size_t i = 0; i < input.length(); ++i) {
+    const char c = input[i];
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) {
+      hex += static_cast<char>((c >= 'a' && c <= 'f') ? c - ('a' - 'A') : c);
+    }
+  }
+  String out;
+  out.reserve(hex.length() + hex.length() / 2);
+  for (size_t i = 0; i < hex.length(); ++i) {
+    if (i > 0 && (i & 1u) == 0) out += ':';
+    out += hex[i];
+  }
+  return out;
 }
 
 String formatIdText(String s) {
@@ -876,7 +1292,7 @@ String readerBodyText(const grove_nfc::CardInfo& card) {
   if (card.protocol == "FeliCa" && !card.detail.isEmpty()) {
     return card.detail;
   }
-  return formatIdText(card.uid);
+  return formatUidDisplay(card.uid);
 }
 
 String protocolTag(const String& protocol) {
@@ -968,7 +1384,9 @@ bool isDumpFilePath(const String& path) {
 bool dumpLengthMatchesType(EmuType type, size_t len) {
   switch (type) {
     case EmuType::MF1K:
-      return len == 1024 || len == 4096;
+      return len == 1024;
+    case EmuType::MF4K:
+      return len == 4096;
     case EmuType::N213:
       return len == 180;
     case EmuType::N215:
@@ -1013,8 +1431,12 @@ bool inferTypeFromPathHint(const String& path, EmuType& out) {
     out = EmuType::Felica;
     return true;
   }
+  if (hint.indexOf("mf4k") >= 0 || hint.indexOf("mfc4k") >= 0 || hint.indexOf("4k") >= 0) {
+    out = EmuType::MF4K;
+    return true;
+  }
   if (hint.indexOf("mifare") >= 0 || hint.indexOf("mfc") >= 0 || hint.indexOf("mf1k") >= 0 ||
-      hint.indexOf("mf4k") >= 0 || hint.indexOf("1k") >= 0 || hint.indexOf("4k") >= 0) {
+      hint.indexOf("1k") >= 0) {
     out = EmuType::MF1K;
     return true;
   }
@@ -1059,7 +1481,8 @@ bool dumpFileLikelyMatchesType(const String& path, EmuType target_type, bool str
     size_t parsed_blocks = 0;
     uint8_t block_hint = 0;
     switch (target_type) {
-      case EmuType::MF1K: block_hint = 16; break;
+      case EmuType::MF1K:
+      case EmuType::MF4K: block_hint = 16; break;
       case EmuType::N213:
       case EmuType::N215:
       case EmuType::N216:
@@ -1068,9 +1491,6 @@ bool dumpFileLikelyMatchesType(const String& path, EmuType target_type, bool str
       default: block_hint = 0; break;
     }
     if (parseJsonBlocksObject(blocks_obj, nullptr, kEmuDumpMaxBytes, block_hint, parsed_len, parsed_blocks)) {
-      if (target_type == EmuType::MF1K) {
-        return parsed_len == 1024 || parsed_len == 4096;
-      }
       return dumpLengthMatchesType(target_type, parsed_len);
     }
   }
@@ -1353,7 +1773,6 @@ String dumpTypeLabel(const String& path) {
     const size_t len = static_cast<size_t>(f.size());
     EmuType type;
     if (inferEmuTypeByLength(len, type)) {
-      if (type == EmuType::MF1K && len == 4096) return "MFC4K";
       return emuName(type);
     }
     if (len > 0 && len <= kIso15DumpMaxBytes && (len % 4u) == 0) return "ISO15693";
@@ -1376,14 +1795,14 @@ String dumpTypeLabel(const String& path) {
   if (extractJsonValue(json, "blocks", blocks_obj) && blocks_obj.startsWith("{")) {
     uint8_t block_hint = 0;
     if (has_file_type) {
-      if (type == EmuType::MF1K) block_hint = 16;
+      if (type == EmuType::MF1K || type == EmuType::MF4K) block_hint = 16;
       else if (type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::ISO15 || type == EmuType::Felica) block_hint = 4;
     }
     parseJsonBlocksObject(blocks_obj, nullptr, kEmuDumpMaxBytes, block_hint, parsed_len, parsed_blocks);
   }
 
   if (has_file_type) {
-    if (type == EmuType::MF1K) {
+    if (type == EmuType::MF1K || type == EmuType::MF4K) {
       if (parsed_len == 4096 || parsed_blocks >= 256) return "MFC4K";
       if (parsed_len == 1024 || parsed_blocks >= 64) return "MFC1K";
       return "MFC";
@@ -1454,7 +1873,7 @@ String buildDumpPreview(const String& path) {
   String preview = dumpDisplayName(path, 24) + "\n";
   preview += dumpTypeLabel(path) + "  " + String(static_cast<size_t>(f.size())) + " bytes\n";
 
-  auto appendBlockLines = [&](const uint8_t* data, size_t len, size_t block_size) {
+  auto appendBlockLines = [&](const uint8_t* data, size_t len, size_t block_size, bool include_ascii) {
     if (data == nullptr || len == 0) {
       preview += "No block data\n";
       return;
@@ -1474,6 +1893,13 @@ String buildDumpPreview(const String& path) {
       for (size_t i = begin; i < end; ++i) {
         preview += hex_chars[(data[i] >> 4) & 0x0F];
         preview += hex_chars[data[i] & 0x0F];
+      }
+      if (include_ascii) {
+        preview += " | ";
+        for (size_t i = begin; i < end; ++i) {
+          const uint8_t c = data[i];
+          preview += (c >= 0x20 && c <= 0x7E) ? static_cast<char>(c) : '.';
+        }
       }
       if (b + 1 < block_count) preview += '\n';
     }
@@ -1501,7 +1927,7 @@ String buildDumpPreview(const String& path) {
 
     size_t block_size_hint = 0;
     if (has_type_hint) {
-      block_size_hint = (type == EmuType::MF1K) ? 16 : 4;
+      block_size_hint = (type == EmuType::MF1K || type == EmuType::MF4K) ? 16 : 4;
     }
 
     String blocks_obj;
@@ -1520,7 +1946,9 @@ String buildDumpPreview(const String& path) {
           if ((out_len % 16u) == 0u && out_len >= 64u) block_size = 16;
           else block_size = 4;
         }
-        appendBlockLines(dump, out_len, block_size);
+        const String preview_type = dumpTypeLabel(path);
+        appendBlockLines(dump, out_len, block_size,
+                         preview_type == "ISO15693" || preview_type.startsWith("NTAG"));
         return preview;
       }
     }
@@ -1539,7 +1967,9 @@ String buildDumpPreview(const String& path) {
           if ((out_len % 16u) == 0u && out_len >= 64u) block_size = 16;
           else block_size = 4;
         }
-        appendBlockLines(dump, out_len, block_size);
+        const String preview_type = dumpTypeLabel(path);
+        appendBlockLines(dump, out_len, block_size,
+                         preview_type == "ISO15693" || preview_type.startsWith("NTAG"));
         return preview;
       }
     }
@@ -1557,7 +1987,8 @@ String buildDumpPreview(const String& path) {
   if (type_label.startsWith("MFC")) block_size = 16;
   else if (type_label == "Unknown" && (got % 16u) == 0u && got >= 64u) block_size = 16;
 
-  appendBlockLines(dump, got, block_size);
+  appendBlockLines(dump, got, block_size,
+                   type_label == "ISO15693" || type_label.startsWith("NTAG"));
   return preview;
 }
 
@@ -1817,6 +2248,7 @@ String deriveEmuUidFromDump(EmuType type, const uint8_t* dump, size_t dump_len) 
 
   switch (type) {
     case EmuType::MF1K:
+    case EmuType::MF4K:
       if (dump_len >= 4) return bytesToHexUpper(dump, 4);
       break;
     case EmuType::N213:
@@ -1859,7 +2291,6 @@ String normalizeHexText(String raw) {
 }
 
 String managedTypeLabelForDump(EmuType type, size_t len) {
-  if (type == EmuType::MF1K && len == 4096) return "MFC4K";
   return String(emuName(type));
 }
 
@@ -1867,6 +2298,8 @@ String defaultAtqaForType(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
       return "0400";
+    case EmuType::MF4K:
+      return "0200";
     case EmuType::N213:
     case EmuType::N215:
     case EmuType::N216:
@@ -1880,6 +2313,8 @@ String defaultSakForType(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
       return "08";
+    case EmuType::MF4K:
+      return "18";
     case EmuType::N213:
     case EmuType::N215:
     case EmuType::N216:
@@ -1986,7 +2421,7 @@ String uidFromDumpBytes(EmuType type, const uint8_t* data, size_t len) {
     uint8_t uid[7] = {data[0], data[1], data[2], data[4], data[5], data[6], data[7]};
     return bytesToHexUpper(uid, sizeof(uid));
   }
-  if (type == EmuType::MF1K && len >= 4) return bytesToHexUpper(data, 4);
+  if ((type == EmuType::MF1K || type == EmuType::MF4K) && len >= 4) return bytesToHexUpper(data, 4);
   if (type == EmuType::ISO15 && len >= 8) return bytesToHexUpper(data, 8);
   return "11223344";
 }
@@ -1994,7 +2429,9 @@ String uidFromDumpBytes(EmuType type, const uint8_t* data, size_t len) {
 String managedFileTypeForDump(EmuType type, size_t len, bool mfu_family) {
   switch (type) {
     case EmuType::MF1K:
-      return len >= 4096 ? "mfc v3" : "mfc v2";
+      return "mfc v2";
+    case EmuType::MF4K:
+      return "mfc v3";
     case EmuType::N213:
     case EmuType::N215:
     case EmuType::N216:
@@ -2024,7 +2461,7 @@ bool writeManagedDumpJson(const String& path,
                           const String& atqa_source,
                           const String& sak_source) {
   if (!data || len == 0) return false;
-  const size_t block_size = type == EmuType::MF1K ? 16u : 4u;
+  const size_t block_size = (type == EmuType::MF1K || type == EmuType::MF4K) ? 16u : 4u;
   if ((len % block_size) != 0) return false;
 
   File f = LittleFS.open(path, "w");
@@ -2180,7 +2617,7 @@ bool normalizeDumpFileInPlace(const String& path, String& status_text, const Str
   if (extractJsonValue(json, "blocks", payload) && payload.startsWith("{")) {
     uint8_t block_hint = 0;
     if (has_hint) {
-      block_hint = hinted_type == EmuType::MF1K ? 16 : 4;
+      block_hint = (hinted_type == EmuType::MF1K || hinted_type == EmuType::MF4K) ? 16 : 4;
     }
     parsed = parseJsonBlocksObject(payload, data, sizeof(data), block_hint, data_len, parsed_blocks);
     if (parsed && hinted_type == EmuType::ISO15) {
@@ -2207,7 +2644,8 @@ bool normalizeDumpFileInPlace(const String& path, String& status_text, const Str
     }
   }
 
-  const bool type_ok = (type == EmuType::MF1K && (data_len == 1024 || data_len == 4096)) ||
+  const bool type_ok = (type == EmuType::MF1K && data_len == 1024) ||
+                       (type == EmuType::MF4K && data_len == 4096) ||
                        (type == EmuType::N213 && data_len == 180) ||
                        (type == EmuType::N215 && data_len == 540) ||
                        (type == EmuType::N216 && data_len == 924) ||
@@ -2692,6 +3130,8 @@ const char* emuDumpPrefKey(EmuType type) {
   switch (type) {
     case EmuType::MF1K:
       return "mf1k";
+    case EmuType::MF4K:
+      return "mf4k";
     case EmuType::N213:
       return "n213";
     case EmuType::N215:
@@ -2736,8 +3176,12 @@ bool mapTypeHintToEmuType(String hint, EmuType& out) {
     out = EmuType::N213;
     return true;
   }
+  if (hint.indexOf("mf4k") >= 0 || hint.indexOf("mfc4k") >= 0 || hint.indexOf("4k") >= 0) {
+    out = EmuType::MF4K;
+    return true;
+  }
   if (hint.indexOf("mifare") >= 0 || hint.indexOf("mf1k") >= 0 || hint.indexOf("mfc1k") >= 0 ||
-      hint.indexOf("mf4k") >= 0 || hint.indexOf("mfc4k") >= 0 || hint.indexOf("1k") >= 0 || hint.indexOf("4k") >= 0) {
+      hint.indexOf("1k") >= 0) {
     out = EmuType::MF1K;
     return true;
   }
@@ -2769,8 +3213,12 @@ bool inferEmuTypeByLength(size_t len, EmuType& out) {
     out = EmuType::N216;
     return true;
   }
-  if (len == 1024 || len == 4096) {
+  if (len == 1024) {
     out = EmuType::MF1K;
+    return true;
+  }
+  if (len == 4096) {
+    out = EmuType::MF4K;
     return true;
   }
   if (len == 448) {
@@ -2788,6 +3236,9 @@ bool mapEmuTypeToDumpType(EmuType in, DumpTagType& out) {
   switch (in) {
     case EmuType::MF1K:
       out = DumpTagType::Mifare1K;
+      return true;
+    case EmuType::MF4K:
+      out = DumpTagType::Mifare4K;
       return true;
     case EmuType::N213:
       out = DumpTagType::Ntag213;
@@ -3022,20 +3473,14 @@ bool readDumpForTargetType(const String& path,
   if (lower.endsWith(".bin")) {
     const size_t file_len = static_cast<size_t>(f.size());
     if (!dumpLengthMatchesType(target_type, file_len)) {
-      if (target_type == EmuType::MF1K) {
-        error_text = "MFK bin needs 1K/4K";
+      if (target_type == EmuType::MF1K || target_type == EmuType::MF4K) {
+        error_text = target_type == EmuType::MF1K ? "MFC1K needs 1024B" : "MFC4K needs 4096B";
       } else if (target_type == EmuType::ISO15) {
         error_text = "ISO15 bin needs 4B blocks";
       } else {
         error_text = "Dump/type mismatch";
       }
       return false;
-    }
-
-    if (target_type == EmuType::MF1K && file_len == 4096) {
-      dump_len = f.read(dump, 1024);
-      truncated_from_4k = true;
-      return dump_len == 1024;
     }
 
     const size_t size = min(file_len, static_cast<size_t>(kEmuDumpMaxBytes));
@@ -3065,9 +3510,11 @@ bool readDumpForTargetType(const String& path,
   }
 
   if (has_hinted_type && hinted_type != target_type) {
+    const bool both_mfc = (target_type == EmuType::MF1K || target_type == EmuType::MF4K) &&
+                          (hinted_type == EmuType::MF1K || hinted_type == EmuType::MF4K);
     const bool target_is_ntag = target_type == EmuType::N213 || target_type == EmuType::N215 || target_type == EmuType::N216;
     const bool allow_mfu_family = has_file_type_hint && target_is_ntag && hinted_type == EmuType::N213 && isPm3MfuFamilyFileType(file_type_hint);
-    if (!allow_mfu_family) {
+    if (!allow_mfu_family && !both_mfc) {
       error_text = "Dump/type mismatch";
       return false;
     }
@@ -3077,7 +3524,8 @@ bool readDumpForTargetType(const String& path,
   if (extractJsonValue(json, "blocks", payload) && payload.startsWith("{")) {
     uint8_t block_size_hint = 0;
     switch (target_type) {
-      case EmuType::MF1K: block_size_hint = 16; break;
+      case EmuType::MF1K:
+      case EmuType::MF4K: block_size_hint = 16; break;
       case EmuType::N213:
       case EmuType::N215:
       case EmuType::N216:
@@ -3125,14 +3573,9 @@ bool readDumpForTargetType(const String& path,
     }
   }
 
-  if (target_type == EmuType::MF1K && dump_len == 4096) {
-    dump_len = 1024;
-    truncated_from_4k = true;
-  }
-
   if (!dumpLengthMatchesType(target_type, dump_len)) {
-    if (target_type == EmuType::MF1K) {
-      error_text = "MFK dump needs 1K/4K";
+    if (target_type == EmuType::MF1K || target_type == EmuType::MF4K) {
+      error_text = target_type == EmuType::MF1K ? "MFC1K needs 1024B" : "MFC4K needs 4096B";
     } else if (target_type == EmuType::ISO15) {
       error_text = "ISO15 dump needs 4B blocks";
     } else {
@@ -3197,11 +3640,11 @@ bool applyDumpToCurrentType(const String& path, bool remember_selection, bool au
   }
 
   if (auto_restore) {
-    emu_dump_status = "Auto " + shortDumpName(path, 14);
+    emu_dump_status = "Auto " + dumpFileName(path);
   } else if (truncated_from_4k) {
-    emu_dump_status = "Loaded 4K->1K " + shortDumpName(path, 10);
+    emu_dump_status = "Loaded 4K->1K " + dumpFileName(path);
   } else {
-    emu_dump_status = "Loaded " + shortDumpName(path, 14);
+    emu_dump_status = "Loaded " + dumpFileName(path);
   }
 
   return true;
@@ -4028,7 +4471,11 @@ bool getPianoPlayLayout(int& note_x,
                         int& key_y,
                         int& key_w,
                         int& key_h) {
+#ifdef APP_TARGET_M5PAPER
+  auto& d = g_canvas;
+#else
   auto& d = M5.Display;
+#endif
   const int w = d.width();
   const int h = d.height();
 
@@ -4093,6 +4540,16 @@ void drawPianoWhiteKey(lgfx::v1::LGFXBase& d,
 
 void drawPianoPlayDiff(int8_t old_note, int8_t new_note, bool update_note_text) {
   if (in_home || menu_page != MenuPage::Piano || piano_stage != PianoStage::Play) return;
+#ifdef APP_TARGET_M5PAPER
+  constexpr int partial_x = 24;
+  constexpr int partial_y = 380;
+  const int partial_w = g_canvas.width() - 48;
+  constexpr int partial_h = 300;
+  drawPianoKeyboard(g_canvas, partial_x, partial_y, partial_w, partial_h, new_note, TFT_BLACK);
+  drawPianoKeyboard(M5.Display, partial_x, partial_y, partial_w, partial_h, new_note, TFT_BLACK);
+  M5.Display.display(partial_x, partial_y, partial_w, partial_h);
+  return;
+#endif
 
   int note_x = 0, note_y = 0, note_w = 0, note_h = 0;
   int key_x = 0, key_y = 0, key_w = 0, key_h = 0;
@@ -4103,7 +4560,12 @@ void drawPianoPlayDiff(int8_t old_note, int8_t new_note, bool update_note_text) 
     return;
   }
 
-  auto& d = M5.Display;
+  auto& d =
+#ifdef APP_TARGET_M5PAPER
+    g_canvas;
+#else
+    M5.Display;
+#endif
   const uint16_t accent = TFT_MAGENTA;
   d.setFont(&fonts::Font0);
   d.setTextSize(2);
@@ -4125,7 +4587,12 @@ void drawPianoPlayDiff(int8_t old_note, int8_t new_note, bool update_note_text) 
 void drawPianoPlayPartial() {
   if (in_home || menu_page != MenuPage::Piano || piano_stage != PianoStage::Play) return;
 
-  auto& d = M5.Display;
+  auto& d =
+#ifdef APP_TARGET_M5PAPER
+    g_canvas;
+#else
+    M5.Display;
+#endif
   int note_x = 0, note_y = 0, note_w = 0, note_h = 0;
   int key_x = 0, key_y = 0, key_w = 0, key_h = 0;
   getPianoPlayLayout(note_x, note_y, note_w, note_h, key_x, key_y, key_w, key_h);
@@ -4307,7 +4774,7 @@ void drawEmuTypeCarousel(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint
 // ---------- Battery icon helper ----------
 static void drawBatteryIcon(lgfx::v1::LGFXBase& d, int x, int y, int icon_w, int icon_h, uint16_t border_color) {
   const int32_t level = M5.Power.getBatteryLevel();
-  if (level < 0) return;  // no battery / PMU
+  if (level < 0) return;
   const int body_w = icon_w - 3;
   const int body_h = icon_h;
   const int nub_w = 2;
@@ -4327,8 +4794,483 @@ static void drawBatteryIcon(lgfx::v1::LGFXBase& d, int x, int y, int icon_w, int
     d.fillRect(x + 1, y + 1, fill, body_h - 2, color);
   }
 }
+
+#ifdef APP_TARGET_M5PAPER
+static void drawM5PaperButton(int x, int y, int w, int h, const String& label, bool filled = false) {
+  g_canvas.fillRoundRect(x, y, w, h, 12, filled ? TFT_BLACK : TFT_WHITE);
+  g_canvas.drawRoundRect(x, y, w, h, 12, TFT_BLACK);
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextSize(2);
+  g_canvas.setTextColor(filled ? TFT_WHITE : TFT_BLACK, filled ? TFT_BLACK : TFT_WHITE);
+  const int tw = g_canvas.textWidth(label);
+  g_canvas.setCursor(x + (w - tw) / 2, y + (h - g_canvas.fontHeight()) / 2);
+  g_canvas.print(label);
+}
+
+static void drawM5PaperPageTitle(const String& title, const String& subtitle) {
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextSize(3);
+  g_canvas.setCursor(24, kStatusBarHeight + 18);
+  g_canvas.print(title);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(26, kStatusBarHeight + 58);
+  g_canvas.print(subtitle);
+}
+
+static void drawM5PaperPixelWrappedText(int x,
+                                        int y,
+                                        int width,
+                                        int line_height,
+                                        int max_lines,
+                                        const String& text) {
+  String remaining = text;
+  remaining.trim();
+  for (int line = 0; line < max_lines && !remaining.isEmpty(); ++line) {
+    size_t fit = 0;
+    size_t last_break = 0;
+    for (size_t i = 1; i <= remaining.length(); ++i) {
+      const String candidate = remaining.substring(0, i);
+      if (g_canvas.textWidth(candidate) > width) break;
+      fit = i;
+      const char c = remaining[i - 1];
+      if (c == ' ' || c == '/' || c == ',' || c == ';' || c == '\n') last_break = i;
+    }
+    if (fit == 0) fit = 1;
+    size_t take = fit;
+    if (fit < remaining.length() && last_break > 0) take = last_break;
+    String part = remaining.substring(0, take);
+    part.trim();
+    if (line == max_lines - 1 && take < remaining.length()) {
+      while (!part.isEmpty() && g_canvas.textWidth(part + "...") > width) {
+        part.remove(part.length() - 1);
+      }
+      part += "...";
+    }
+    g_canvas.setCursor(x, y + line * line_height);
+    g_canvas.print(part);
+    remaining = remaining.substring(take);
+    remaining.trim();
+  }
+}
+
+static void drawM5PaperHomeIcon(int cx, int cy, MenuPage page, uint16_t color) {
+  if (page == MenuPage::Reader) {
+    g_canvas.drawRoundRect(cx - 28, cy - 22, 56, 42, 6, color);
+    g_canvas.drawRoundRect(cx - 22, cy - 16, 44, 30, 4, color);
+    g_canvas.drawArc(cx - 2, cy - 1, 7, 5, 300, 60, color);
+    g_canvas.drawArc(cx - 2, cy - 1, 12, 10, 300, 60, color);
+  } else if (page == MenuPage::Piano) {
+    g_canvas.drawRoundRect(cx - 32, cy - 24, 64, 48, 5, color);
+    for (int i = 1; i < 8; ++i) {
+      const int x = cx - 32 + i * 8;
+      g_canvas.drawLine(x, cy - 23, x, cy + 23, color);
+    }
+    static const uint8_t black_after[] = {1, 2, 4, 5, 6};
+    for (uint8_t i : black_after) {
+      const int x = cx - 32 + i * 8 - 2;
+      g_canvas.fillRect(x, cy - 23, 5, 24, color);
+    }
+  } else {
+    drawHomeIconForPage(g_canvas, cx, cy, page, color);
+  }
+}
+
+static void drawM5PaperReaderPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  drawM5PaperPageTitle("CARD READER", "AUTO / ALL PROTOCOLS");
+
+  const int card_x = 24, card_y = 170, card_w = w - 48, card_h = 570;
+  g_canvas.drawRoundRect(card_x, card_y, card_w, card_h, 18, TFT_BLACK);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setFont(&fonts::Font0);
+  if (last_card.valid) {
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(card_x + 28, card_y + 38);
+    g_canvas.print("CARD DETECTED");
+    g_canvas.drawLine(card_x + 28, card_y + 78, card_x + card_w - 28, card_y + 78, TFT_BLACK);
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(card_x + 28, card_y + 118);
+    g_canvas.print("PROTOCOL");
+    g_canvas.setTextSize(3);
+    g_canvas.setCursor(card_x + 28, card_y + 148);
+    g_canvas.print(protocolFull(last_card.protocol));
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(card_x + 28, card_y + 230);
+    g_canvas.print("UID / IDENTIFIER");
+    String uid = formatUidDisplay(last_card.uid);
+    g_canvas.setTextSize(3);
+    if (g_canvas.textWidth(uid) > card_w - 56) g_canvas.setTextSize(2);
+    g_canvas.setCursor(card_x + 28, card_y + 270);
+    g_canvas.print(uid);
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(card_x + 28, card_y + 430);
+    g_canvas.print("DETAIL");
+    drawM5PaperPixelWrappedText(card_x + 28, card_y + 470, card_w - 56, 34, 3, last_card.detail);
+  } else {
+    g_canvas.setTextSize(3);
+    const String waiting = "READY TO SCAN";
+    g_canvas.setCursor(card_x + (card_w - g_canvas.textWidth(waiting)) / 2, card_y + 180);
+    g_canvas.print(waiting);
+    g_canvas.setTextSize(2);
+    const String hint = "Place a card near GroveNFC";
+    g_canvas.setCursor(card_x + (card_w - g_canvas.textWidth(hint)) / 2, card_y + 250);
+    g_canvas.print(hint);
+    g_canvas.setTextSize(2);
+    const String no_card = last_card.detail.isEmpty() ? String("No Card") : last_card.detail;
+    const int no_card_w = g_canvas.textWidth(no_card);
+    g_canvas.setCursor(card_x + (card_w - no_card_w) / 2, card_y + 330);
+    g_canvas.print(no_card);
+  }
+  drawM5PaperButton(24, 820, w - 48, 88, "SCAN NOW", true);
+}
+
+static void drawM5PaperEmulatorPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  drawM5PaperPageTitle("CARD EMULATOR", "TOUCH A TYPE TO EMULATE");
+
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(24, 146);
+  g_canvas.print("TAP A CARD TYPE");
+  constexpr int grid_x = 24, grid_y = 174, cell_w = 117, cell_h = 76, gap = 8;
+  for (uint8_t i = 0; i < static_cast<uint8_t>(EmuType::Count); ++i) {
+    const EmuType type = static_cast<EmuType>(i);
+    const int col = i % 4, row = i / 4;
+    const int x = grid_x + col * (cell_w + gap);
+    const int y = grid_y + row * (cell_h + gap);
+    const bool selected = type == emu_type;
+    const bool supported = isEmuTypeSupportedCurrentMode(type);
+    g_canvas.fillRoundRect(x, y, cell_w, cell_h, 10, selected ? TFT_BLACK : TFT_WHITE);
+    g_canvas.drawRoundRect(x, y, cell_w, cell_h, 10, supported ? TFT_BLACK : 0xC618);
+    g_canvas.setTextSize(2);
+    g_canvas.setTextColor(selected ? TFT_WHITE : (supported ? TFT_BLACK : 0xC618),
+                          selected ? TFT_BLACK : TFT_WHITE);
+    const String label = emuName(type);
+    g_canvas.setCursor(x + (cell_w - g_canvas.textWidth(label)) / 2, y + 27);
+    g_canvas.print(label);
+  }
+
+  const int panel_x = 24, panel_y = 366, panel_w = w - 48, panel_h = 170;
+  // The final grid item (ISO15) may be selected, leaving the canvas in
+  // reverse text mode. Restore the normal card palette before drawing status
+  // and UID so those labels never inherit the selected tile background.
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.fillRoundRect(panel_x, panel_y, panel_w, panel_h, 18, TFT_WHITE);
+  g_canvas.drawRoundRect(panel_x, panel_y, panel_w, panel_h, 18, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(panel_x + 20, panel_y + 20);
+  g_canvas.print("STATUS");
+  g_canvas.setTextSize(3);
+  g_canvas.setCursor(panel_x + 20, panel_y + 50);
+  g_canvas.print(emu_started ? "EMULATING" : "STARTING...");
+  drawM5PaperButton(354, 384, 144, 64, "LOAD DUMP");
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.drawLine(panel_x + 20, panel_y + 98, panel_x + panel_w - 20, panel_y + 98, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(panel_x + 20, panel_y + 112);
+  g_canvas.print("ACTIVE UID");
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(panel_x + 160, panel_y + 112);
+  g_canvas.print(ellipsizeCanvasText(formatUidDisplay(activeEmulatorDisplayId(emu_type)), panel_w - 200));
+
+  const int table_x = 24, table_y = 558, table_w = w - 48, table_h = 350;
+  g_canvas.drawRoundRect(table_x, table_y, table_w, table_h, 18, TFT_BLACK);
+  g_canvas.fillRect(table_x + 1, table_y + 1, table_w - 2, 48, TFT_BLACK);
+  g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(table_x + 18, table_y + 14);
+  g_canvas.print("DUMP HEX");
+  const uint8_t type_idx = static_cast<uint8_t>(emu_type);
+  const String dump_path = type_idx < static_cast<uint8_t>(EmuType::Count)
+                               ? emu_dump_loaded_path[type_idx]
+                               : String();
+  if (!dump_path.isEmpty() && littlefs_ready && LittleFS.exists(dump_path)) {
+    String dump_name = dump_path.substring(dump_path.lastIndexOf('/') + 1);
+    g_canvas.setCursor(table_x + 150, table_y + 14);
+    g_canvas.print(ellipsizeCanvasText(dump_name, table_w - 174));
+
+    const String preview = buildDumpPreview(dump_path);
+    size_t start = 0;
+    for (int header = 0; header < 3 && start < preview.length(); ++header) {
+      const int nl = preview.indexOf('\n', start);
+      start = nl < 0 ? preview.length() : static_cast<size_t>(nl + 1);
+    }
+    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+    g_canvas.setTextSize(2);
+    for (int row = 0; row < 9 && start < preview.length(); ++row) {
+      int nl = preview.indexOf('\n', start);
+      if (nl < 0) nl = preview.length();
+      String line = preview.substring(start, static_cast<size_t>(nl));
+      start = static_cast<size_t>(nl + 1);
+      const int y = table_y + 61 + row * 31;
+      if ((row & 1) == 0) g_canvas.fillRect(table_x + 1, y - 4, table_w - 2, 30, 0xDEFB);
+      g_canvas.setTextColor(TFT_BLACK, (row & 1) == 0 ? 0xDEFB : TFT_WHITE);
+      g_canvas.setCursor(table_x + 16, y);
+      g_canvas.print(ellipsizeCanvasText(line, table_w - 32));
+    }
+  } else {
+    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+    g_canvas.setTextSize(3);
+    const String built_in = "BUILT-IN DATA";
+    g_canvas.setCursor(table_x + (table_w - g_canvas.textWidth(built_in)) / 2, table_y + 142);
+    g_canvas.print(built_in);
+    g_canvas.setTextSize(2);
+    const String hint = "Load a dump to inspect its HEX data";
+    g_canvas.setCursor(table_x + (table_w - g_canvas.textWidth(hint)) / 2, table_y + 194);
+    g_canvas.print(hint);
+  }
+  g_canvas.setTextSize(2);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+}
+
+static void drawM5PaperDumpsPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  drawM5PaperPageTitle(dumps_pick_for_emu ? "LOAD DUMP" : "DUMP LIBRARY",
+                       dumps_pick_for_emu ? String("FILTER: ") + emuName(emu_type) : emu_dump_status);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setTextSize(2);
+  const String ap_line = String("AP: ") + kEmuApSsid + (emu_ap_active ? "  ON" : "  OFF");
+  g_canvas.setCursor(w - g_canvas.textWidth(ap_line) - 22, 142);
+  g_canvas.print(ap_line);
+  const int list_y = 170, row_h = 76, visible = 7;
+  int first = 0;
+  if (dump_file_index >= visible) first = dump_file_index - visible + 1;
+  if (emu_dump_count == 0) {
+    g_canvas.setTextSize(2);
+    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+    g_canvas.setCursor(36, 250);
+    g_canvas.print("No compatible dump files");
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(36, 300);
+    drawWrappedText(g_canvas, 36, 300, w - 72, 28, 3, 20,
+                    "Use the Dump Library Wi-Fi portal to add files.", TFT_BLACK, TFT_WHITE);
+  }
+  for (int row = 0; row < visible; ++row) {
+    const int idx = first + row;
+    if (idx >= emu_dump_count) break;
+    const int y = list_y + row * row_h;
+    const bool selected = idx == dump_file_index;
+    g_canvas.fillRoundRect(20, y, w - 40, row_h - 8, 10, selected ? TFT_BLACK : TFT_WHITE);
+    g_canvas.drawRoundRect(20, y, w - 40, row_h - 8, 10, TFT_BLACK);
+    g_canvas.setTextColor(selected ? TFT_WHITE : TFT_BLACK, selected ? TFT_BLACK : TFT_WHITE);
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(32, y + 12);
+    g_canvas.print(emu_dump_uid_view[idx]);
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(32, y + 43);
+    String file_line = dumpTypeLabel(emu_dump_files[idx]) + String("  ") + emu_dump_files[idx].substring(emu_dump_files[idx].lastIndexOf('/') + 1);
+    g_canvas.print(ellipsizeCanvasText(file_line, w - 64));
+  }
+  g_canvas.setTextSize(2);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setCursor(20, 870);
+  g_canvas.print("Tap a dump for actions");
+
+  if (m5paper_dump_actions && dump_file_index < emu_dump_count) {
+    g_canvas.fillRoundRect(36, 480, w - 72, 440, 18, TFT_WHITE);
+    g_canvas.drawRoundRect(36, 480, w - 72, 440, 18, TFT_BLACK);
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(60, 510);
+    String selected_name = emu_dump_files[dump_file_index];
+    selected_name = selected_name.substring(selected_name.lastIndexOf('/') + 1);
+    g_canvas.print(selected_name);
+    drawM5PaperButton(60, 560, 420, 76, "PREVIEW");
+    drawM5PaperButton(60, 650, 420, 76, "EMULATE", true);
+    drawM5PaperButton(60, 740, 420, 76, "DELETE");
+    drawM5PaperButton(60, 830, 420, 76, "CANCEL");
+  }
+  if (m5paper_dump_delete_confirm) {
+    g_canvas.fillRoundRect(44, 520, w - 88, 250, 18, TFT_WHITE);
+    g_canvas.drawRoundRect(44, 520, w - 88, 250, 18, TFT_BLACK);
+    g_canvas.setTextSize(3);
+    g_canvas.setCursor(86, 555);
+    g_canvas.print("DELETE DUMP?");
+    g_canvas.setTextSize(2);
+    g_canvas.setCursor(82, 595);
+    g_canvas.print("This cannot be undone.");
+    drawM5PaperButton(70, 620, 180, 86, "DELETE", true);
+    drawM5PaperButton(290, 620, 180, 86, "CANCEL");
+  }
+}
+
+static void drawM5PaperDumpPreviewPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  if (dump_file_index >= emu_dump_count) return;
+  const String path = emu_dump_files[dump_file_index];
+  String filename = path.substring(path.lastIndexOf('/') + 1);
+  drawM5PaperPageTitle("DUMP PREVIEW", filename);
+
+  String type_label, uid, sak, atqa, source_label;
+  readDumpMetaForWeb(path, type_label, uid, sak, atqa, source_label);
+  File f = LittleFS.open(path, "r");
+  const size_t file_size = f ? static_cast<size_t>(f.size()) : 0;
+  if (f) f.close();
+
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setTextSize(2);
+  g_canvas.drawRoundRect(20, 165, w - 40, 200, 14, TFT_BLACK);
+  g_canvas.setCursor(38, 185);
+  g_canvas.print("TYPE");
+  g_canvas.setCursor(170, 185);
+  g_canvas.print(type_label);
+  g_canvas.setCursor(38, 220);
+  g_canvas.print("UID");
+  g_canvas.setCursor(170, 220);
+  g_canvas.print(uid);
+  g_canvas.setCursor(38, 255);
+  g_canvas.print("ATQA / SAK");
+  g_canvas.setCursor(210, 255);
+  g_canvas.print(atqa + " / " + sak);
+  g_canvas.setCursor(38, 290);
+  g_canvas.print("SOURCE");
+  g_canvas.setCursor(170, 290);
+  g_canvas.print(source_label);
+  g_canvas.setCursor(38, 325);
+  g_canvas.print("FILE SIZE");
+  g_canvas.setCursor(210, 325);
+  g_canvas.print(String(file_size) + " bytes");
+
+  constexpr int table_x = 20;
+  constexpr int table_y = 390;
+  constexpr int table_w = 500;
+  constexpr int header_h = 42;
+  constexpr int row_h = 27;
+  constexpr int rows_per_page = 17;
+  g_canvas.fillRect(table_x, table_y, table_w, header_h, TFT_BLACK);
+  g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(table_x + 14, table_y + 11);
+  g_canvas.print("INDEX");
+  g_canvas.setCursor(table_x + 118, table_y + 11);
+  g_canvas.print("HEX DATA");
+  const bool show_ascii = type_label == "ISO15693" || type_label.startsWith("NTAG");
+  if (show_ascii) {
+    g_canvas.setCursor(table_x + 360, table_y + 11);
+    g_canvas.print("ASCII");
+  }
+
+  size_t start = 0;
+  int header_lines = 0;
+  while (start < dumps_preview_text.length() && header_lines < 3) {
+    const int nl = dumps_preview_text.indexOf('\n', start);
+    if (nl < 0) break;
+    start = static_cast<size_t>(nl + 1);
+    ++header_lines;
+  }
+  for (size_t skipped = 0; skipped < dumps_preview_offset && start < dumps_preview_text.length(); ++skipped) {
+    const int nl = dumps_preview_text.indexOf('\n', start);
+    start = nl < 0 ? dumps_preview_text.length() : static_cast<size_t>(nl + 1);
+  }
+
+  g_canvas.setFont(&fonts::Font0);
+  for (int row = 0; row < rows_per_page && start < dumps_preview_text.length(); ++row) {
+    int nl = dumps_preview_text.indexOf('\n', start);
+    if (nl < 0) nl = dumps_preview_text.length();
+    String line = dumps_preview_text.substring(start, static_cast<size_t>(nl));
+    start = static_cast<size_t>(nl + 1);
+    const int colon = line.indexOf(':');
+    if (colon < 0) continue;
+    String index_text = line.substring(0, colon);
+    String hex_text = line.substring(colon + 1);
+    hex_text.trim();
+    String ascii_text;
+    const int ascii_sep = hex_text.indexOf("|");
+    if (ascii_sep >= 0) {
+      ascii_text = hex_text.substring(ascii_sep + 1);
+      ascii_text.trim();
+      hex_text = hex_text.substring(0, ascii_sep);
+      hex_text.trim();
+    }
+    const int y = table_y + header_h + row * row_h;
+    if ((row & 1) == 0) g_canvas.fillRect(table_x, y, table_w, row_h, 0xDEFB);
+    g_canvas.setTextColor(TFT_BLACK, (row & 1) == 0 ? 0xDEFB : TFT_WHITE);
+    g_canvas.setTextSize(2);
+    char index_buf[8];
+    snprintf(index_buf, sizeof(index_buf), "%04u", static_cast<unsigned>(index_text.toInt()));
+    g_canvas.setCursor(table_x + 14, y + 5);
+    g_canvas.print(index_buf);
+    g_canvas.setCursor(table_x + 112, y + 5);
+    g_canvas.print(hex_text);
+    if (show_ascii) {
+      g_canvas.setCursor(table_x + 360, y + 5);
+      g_canvas.print(ascii_text);
+    }
+    g_canvas.drawLine(table_x, y + row_h - 1, table_x + table_w, y + row_h - 1, TFT_LIGHTGREY);
+  }
+  g_canvas.drawRect(table_x, table_y, table_w, header_h + rows_per_page * row_h, TFT_BLACK);
+  g_canvas.drawLine(table_x + 96, table_y, table_x + 96, table_y + header_h + rows_per_page * row_h, TFT_BLACK);
+  if (show_ascii) {
+    g_canvas.drawLine(table_x + 348, table_y, table_x + 348, table_y + header_h + rows_per_page * row_h, TFT_BLACK);
+  }
+  g_canvas.setTextSize(1);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setCursor(20, 915);
+  g_canvas.print("Tap table for next page");
+}
+
+static void drawM5PaperPianoPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  drawM5PaperPageTitle("NFC PIANO", String("MAPPED CARDS: ") + pianoMappedCount() + "/8");
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  if (piano_stage == PianoStage::Menu) {
+    drawM5PaperButton(24, 260, w - 48, 110, "PLAY", true);
+    drawM5PaperButton(24, 400, w - 48, 110, "CONFIGURE 8 CARDS");
+    g_canvas.setTextSize(2);
+    drawWrappedText(g_canvas, 36, 570, w - 72, 32, 5, 20,
+                    "Map eight NFC cards to musical notes, then tap PLAY and present a card to sound its note.",
+                    TFT_BLACK, TFT_WHITE);
+  } else {
+    g_canvas.setTextSize(3);
+    const String note = piano_stage == PianoStage::Config ? String(kPianoNoteName[piano_config_step]) : piano_last_note;
+    const int note_w = g_canvas.textWidth(note);
+    g_canvas.setCursor((w - note_w) / 2, 210);
+    g_canvas.print(note);
+    g_canvas.setTextSize(2);
+    const int status_w = g_canvas.textWidth(piano_status);
+    g_canvas.setCursor(max(20, (w - status_w) / 2), 270);
+    g_canvas.print(piano_status);
+    drawPianoKeyboard(g_canvas, 24, 380, w - 48, 300, piano_active_note_idx, TFT_BLACK);
+    g_canvas.setTextSize(2);
+    drawWrappedText(g_canvas, 32, 730, w - 64, 32, 4, 20,
+                    piano_stage == PianoStage::Config
+                        ? "Present one card for each requested note. Configuration saves after all eight cards."
+                        : "Present a configured card to play. Tap Back to leave piano mode.",
+                    TFT_BLACK, TFT_WHITE);
+  }
+}
+
+static void drawM5PaperAboutPage() {
+  const int w = g_canvas.width();
+  g_canvas.fillScreen(TFT_WHITE);
+  drawM5PaperPageTitle("ABOUT", "GROVENFC TOUCH REFERENCE DEVICE");
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(28, 190);
+  g_canvas.print("DEVICE");
+  drawM5PaperPixelWrappedText(28, 228, w - 56, 32, 5,
+                              "M5Paper 540x960 e-ink touch controller with GroveNFC on I2C GPIO25/GPIO32. Reader, emulator and dump library run locally.");
+  g_canvas.setCursor(28, 405);
+  g_canvas.print("SUPPORTED READING");
+  drawM5PaperPixelWrappedText(28, 443, w - 56, 32, 5,
+                              "ISO14443A, ISO14443B, ISO15693 and FeliCa. Detects MIFARE Classic, Ultralight, NTAG and DESFire families when available.");
+  g_canvas.setCursor(28, 620);
+  g_canvas.print("SUPPORTED EMULATION");
+  drawM5PaperPixelWrappedText(28, 658, w - 56, 32, 5,
+                              "MIFARE Classic 1K, NTAG213, NTAG215, NTAG216, ISO14443B, FeliCa and ISO15693. JSON/BIN dumps can be loaded from LittleFS.");
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(28, 870);
+  g_canvas.printf("Module: %s   HW:%04X FW:%04X", nfc_module_name.c_str(), hw_ver, fw_ver);
+}
+#endif
  
-void drawScreen(bool popup_only = false) {
+void drawScreen(bool popup_only) {
   auto& d = g_canvas;  // draw to off-screen sprite; push to display at every exit
   if (!popup_only) {
     d.fillScreen(TFT_BLACK);
@@ -4347,6 +5289,35 @@ void drawScreen(bool popup_only = false) {
   if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
   if (menu_page == MenuPage::About) accent = TFT_CYAN;
   // Unit NFC and GroveNFC share the same color mapping.
+
+#ifdef APP_TARGET_M5PAPER
+  if (!in_home && menu_page == MenuPage::Reader) {
+    drawM5PaperReaderPage();
+    pushCanvasToEink();
+    return;
+  }
+  if (!in_home && menu_page == MenuPage::Emulator) {
+    drawM5PaperEmulatorPage();
+    pushCanvasToEink();
+    return;
+  }
+  if (!in_home && menu_page == MenuPage::WebFiles) {
+    if (dumps_stage == DumpsStage::Preview) drawM5PaperDumpPreviewPage();
+    else drawM5PaperDumpsPage();
+    pushCanvasToEink();
+    return;
+  }
+  if (!in_home && menu_page == MenuPage::Piano) {
+    drawM5PaperPianoPage();
+    pushCanvasToEink();
+    return;
+  }
+  if (!in_home && menu_page == MenuPage::About) {
+    drawM5PaperAboutPage();
+    pushCanvasToEink();
+    return;
+  }
+#endif
 
 #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS)
   if (w > h) {
@@ -4438,7 +5409,11 @@ void drawScreen(bool popup_only = false) {
         d.setCursor(row_x + 6, text_y);
         d.print(typeMenuLabel(static_cast<uint8_t>(idx)));
       }
+#ifdef APP_TARGET_M5PAPER
+      pushCanvasToEink();
+#else
       g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
       return;
     }
 
@@ -4582,7 +5557,11 @@ void drawScreen(bool popup_only = false) {
         d.setCursor(4, h - 24);
         d.print(boot_notice_line);
       }
+#ifdef APP_TARGET_M5PAPER
+      pushCanvasToEink();
+#else
       g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
       return;
     }
 
@@ -4835,7 +5814,11 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(box_x + 6, box_y + box_h - 14);
       d.print("CLICK NO   HOLD YES");
     }
+#ifdef APP_TARGET_M5PAPER
+    pushCanvasToEink();
+#else
     g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
     return;
   }
 #endif
@@ -4932,14 +5915,64 @@ void drawScreen(bool popup_only = false) {
     return;
   }
 
+#ifdef APP_TARGET_M5PAPER
+  // ---- M5Paper: 2-column grid home layout with status bar ----
   if (in_home) {
-    d.setTextColor(breathingColor(accent), TFT_BLACK);
-    d.setTextSize(2);
-    String brand = nfc_module_name;
-    int brand_w = d.textWidth(brand);
-    d.setCursor((w - brand_w) / 2, 3);
-    d.print(brand);
-    d.fillRect(0, 19, w, 109, TFT_BLACK);
+    auto& hd = g_canvas;
+    const int screen_w = M5.Display.width();
+    const int screen_h = M5.Display.height();
+    hd.fillScreen(TFT_WHITE);
+
+    const int sb_h = kStatusBarHeight;
+    hd.fillRect(0, 0, w, sb_h, TFT_WHITE);
+    hd.drawLine(0, sb_h, w, sb_h, TFT_BLACK);
+
+    hd.setFont(&fonts::Font0);
+    hd.setTextSize(2);
+    hd.setTextColor(TFT_BLACK, TFT_WHITE);
+    hd.setCursor(4, 5);
+    hd.print("GroveNFC");
+    hd.setTextSize(1);
+    hd.setCursor(screen_w - 102, 8);
+    hd.print(nfc_module_name);
+
+    const int items = homePageCount();
+    for (int i = 0; i < items; ++i) {
+      const auto tile = getM5PaperHomeTile(i, screen_w, screen_h);
+      const bool selected = (i == home_index);
+      const MenuPage pg = homePageAt(i);
+
+      if (selected) {
+        hd.fillRoundRect(tile.x, tile.y, tile.w, tile.h, 8, TFT_BLACK);
+        hd.drawRoundRect(tile.x, tile.y, tile.w, tile.h, 8, TFT_BLACK);
+      } else {
+        hd.drawRoundRect(tile.x, tile.y, tile.w, tile.h, 8, TFT_BLACK);
+      }
+
+      drawM5PaperHomeIcon(tile.icon_cx, tile.icon_cy, pg, selected ? TFT_WHITE : TFT_BLACK);
+
+      hd.setFont(&fonts::Font0);
+      hd.setTextSize(2);
+      hd.setTextColor(selected ? TFT_WHITE : TFT_BLACK, selected ? TFT_BLACK : TFT_WHITE);
+      const String name = String(homePageName(pg));
+      const int label_w = hd.textWidth(name);
+      hd.setCursor(tile.icon_cx - label_w / 2, tile.y + tile.h - 28);
+      hd.print(name);
+    }
+
+    hd.setFont(&fonts::Font0);
+    hd.setTextSize(1);
+    hd.setTextColor(TFT_BLACK, TFT_WHITE);
+    if (!boot_notice_line.isEmpty()) {
+      const int notice_w = hd.textWidth(boot_notice_line);
+      hd.setCursor(screen_w - notice_w - 4, screen_h - 12);
+      hd.print(boot_notice_line);
+    }
+    pushCanvasToEink(true);
+    return;
+  }
+#else
+  if (in_home) {
 
     // Arrows with flash feedback
     auto drawArrow = [&](bool left, uint16_t col) {
@@ -5068,9 +6101,14 @@ void drawScreen(bool popup_only = false) {
       d.setCursor(4, 118);
       d.print(boot_notice_line);
     }
+#ifdef APP_TARGET_M5PAPER
+    pushCanvasToEink();
+#else
     g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
     return;
   }
+#endif
 
   String title_line;
   String sub_title_line;
@@ -5112,6 +6150,7 @@ void drawScreen(bool popup_only = false) {
       body_line += wifi_status;
     }
   } else if (menu_page == MenuPage::Emulator) {
+    emu_user_stopped = false;
     sub_title_line = "Emulator";
     title_line = String(emuName(emu_type));
     const String emu_id = activeEmulatorDisplayId(emu_type);
@@ -5388,7 +6427,11 @@ void drawScreen(bool popup_only = false) {
         thumb_y += ((track_h - 2 - thumb_h) * scroll_start) / safe_scroll;
       }
       d.fillRect(track_x + 1, thumb_y, scroll_w - 2, thumb_h, accent);
+#ifdef APP_TARGET_M5PAPER
+      pushCanvasToEink();
+#else
       g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
       return;
     }
   }
@@ -5511,7 +6554,11 @@ void drawScreen(bool popup_only = false) {
     d.print("CLICK NO  HOLD YES");
     d.setTextColor(TFT_WHITE, TFT_BLACK);
   }
+#ifdef APP_TARGET_M5PAPER
+  pushCanvasToEink();
+#else
   g_canvas.pushSprite(&M5.Display, 0, 0);
+#endif
 }
 
 bool recoverNfc(const char* reason, bool rebegin) {
@@ -5599,7 +6646,7 @@ void goHome() {
   emu_switch_apply_pending = false;
   dumps_stage = DumpsStage::Browse;
   dumps_pick_for_emu = false;
-  menu_page = homePageAt(home_index);
+  home_index = -1;
   setSpeaker5V(false);
   drawScreen();
 }
@@ -5611,6 +6658,10 @@ void enterCurrentFeature() {
   emu_config_stage = EmuConfigStage::None;
 
   if (menu_page == MenuPage::Reader) {
+    if (nfc_ready && isNfcUnitMode() && nfc.isNfcUnitEmulating()) {
+      sendNfcCmdAndWait(NfcCmd::StopRF, 2000);
+      sendNfcCmdAndWait(NfcCmd::Recover, 3000);
+    }
     last_card.valid = false;
     last_card.protocol = "None";
     last_card.uid = "";
@@ -5632,12 +6683,12 @@ void enterCurrentFeature() {
     last_ndef_auto_ms = 0;
   } else if (menu_page == MenuPage::Emulator) {
     emu_switch_apply_pending = false;
-    emu_type = EmuType::MF1K;  // Default MFC1K
+    emu_type = EmuType::N213;  // Default NTAG213
     emu_menu_index = 1;
     emu_show_menu = false;
     const String saved_path = loadLastDumpForType(emu_type);
     if (saved_path.isEmpty()) {
-      emu_dump_status = "No dump";
+      updateEmulatorSourceStatus();
     } else {
       emu_dump_status = "Saved " + shortDumpName(saved_path, 14);
     }
@@ -5748,18 +6799,34 @@ void switchEmuType(int8_t dir = 1) {
   const EmuType from = emu_type;
   const EmuType to = emuTypeWithOffset(emu_type, dir > 0 ? 1 : -1);
   emu_type = to;
+  updateEmulatorSourceStatus();
   emu_type_anim_from = from;
   emu_type_anim_to = to;
   emu_type_anim_dir = (dir > 0) ? 1 : -1;
   emu_type_anim_start_ms = millis();
   emu_type_anim_active = (from != to);
   last_emu_anim_ms = 0;
+  emu_user_stopped = false;
   emu_switch_apply_pending = nfc_ready;
   if (emu_switch_apply_pending) {
     emu_started = false;
   } else {
     emu_started = false;
   }
+  drawScreen();
+}
+
+void selectEmuType(EmuType type) {
+  if (!isEmuTypeSupportedCurrentMode(type) || type == emu_type) return;
+  const EmuType from = emu_type;
+  emu_type = type;
+  updateEmulatorSourceStatus();
+  emu_type_anim_from = from;
+  emu_type_anim_to = type;
+  emu_type_anim_active = false;
+  emu_user_stopped = false;
+  emu_started = false;
+  emu_switch_apply_pending = nfc_ready;
   drawScreen();
 }
 
@@ -5837,6 +6904,7 @@ void runBootDebugFlow() {
   diagnose_ok = false;
   diagnose_report = "Boot debug running...";
 
+#ifndef APP_TARGET_M5PAPER
   auto& d = M5.Display;
   d.fillScreen(TFT_BLACK);
   d.setFont(&fonts::Font2);
@@ -5885,6 +6953,7 @@ void runBootDebugFlow() {
   boot_debug_running = false;
   goHome();
   Serial.println("[BOOT] Auto debug done");
+#endif
 }
 
 String getFieldValue(const String& source, const String& key) {
@@ -6201,12 +7270,12 @@ void nfcWorkerTask(void* /*param*/) {
                   case EmuType::N215:  return nfc.startNfcUnitEmulationNtag(215);
                   case EmuType::N216:  return nfc.startNfcUnitEmulationNtag(216);
                   case EmuType::Felica:return nfc.startNfcUnitEmulationFelica();
-                  case EmuType::MF1K:  return nfc.startNfcUnitEmulationMifare1K();
-                  default:             return false;  // ISO14B, ISO15 not supported
+                  default:             return false;  // MFC, ISO14B, ISO15 not supported on Unit
                 }
               }
               switch (et) {
                 case EmuType::MF1K:   return nfc.startEmulationMifare1K();
+                case EmuType::MF4K:   return nfc.startEmulationMifare4K();
                 case EmuType::N213:   return nfc.startEmulationNtag213();
                 case EmuType::N215:   return nfc.startEmulationNtag215();
                 case EmuType::N216:   return nfc.startEmulationNtag216();
@@ -6218,16 +7287,12 @@ void nfcWorkerTask(void* /*param*/) {
             };
 
             if (nfc_ready) {
-              // Recover module to clean state before any emulation type switch
-              // so that stale register/EERPOM state from the previous type does
-              // not interfere with the new emulation.
+              // Restore the 2026-07-04 Unit NFC lifecycle that is confirmed to
+              // emulate NTAG213 on StickS3: recover reader state, explicitly
+              // end emulation/RF, wait for the field to collapse, then start A.
               nfc.recover();
-              // Stop RF first so external reader re-detects with new protocol
-              if (isNfcUnitMode()) {
-                nfc.stopNfcUnitEmulation();
-              } else {
-                nfc.stopRF();
-              }
+              if (isNfcUnitMode()) nfc.stopNfcUnitEmulation();
+              else nfc.stopRF();
               delay(50);
               EmuType et = static_cast<EmuType>(nfc_w_emu_type);
               bool ok = startForType(et);
@@ -6697,6 +7762,68 @@ void processPianoResult() {
 }  // namespace
 
 void setup() {
+  Serial.begin(115200);
+#if defined(APP_TARGET_M5PAPER)
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  M5.Display.setRotation(0);
+  const int sw = M5.Display.width();
+  const int sh = M5.Display.height();
+
+  // A 540x960 16-bit frame is about 1 MiB, so it must live in PSRAM.
+  // LGFX sprites default to internal DMA RAM unless this is requested.
+  g_canvas.setPsram(true);
+  g_canvas.setColorDepth(16);
+  s_epd_ready = g_canvas.createSprite(sw, sh) != nullptr;
+  Serial.printf("[BOOT] PSRAM=%u free=%u canvas=%s (%dx%d)\n",
+                ESP.getPsramSize(),
+                ESP.getFreePsram(),
+                s_epd_ready ? "OK" : "FAIL",
+                sw,
+                sh);
+  if (!s_epd_ready) {
+    Serial.println("[BOOT] M5Paper canvas allocation failed");
+  }
+
+  // Set home state before drawing
+  in_home = true;
+  home_index = -1;
+  menu_page = MenuPage::Reader;
+
+  // Render home grid directly into g_canvas.
+  // This mirrors the minimal test exactly (no helper layers) so it is
+  // guaranteed to use the same push+display path that we know works.
+  g_canvas.fillScreen(TFT_WHITE);
+  // Status bar
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextSize(2);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  g_canvas.setCursor(4, 5);
+  g_canvas.print("GroveNFC");
+  g_canvas.drawLine(0, kStatusBarHeight, sw, kStatusBarHeight, TFT_BLACK);
+  // Tiles
+  for (int i = 0; i < homePageCount(); ++i) {
+    const auto tile = getM5PaperHomeTile(i, sw, sh);
+    const MenuPage pg = homePageAt(i);
+    g_canvas.drawRoundRect(tile.x, tile.y, tile.w, tile.h, 8, TFT_BLACK);
+    drawM5PaperHomeIcon(tile.icon_cx, tile.icon_cy, pg, TFT_BLACK);
+    g_canvas.setFont(&fonts::Font0);
+    g_canvas.setTextSize(2);
+    g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+    const String tileName = String(homePageName(pg));
+    const int lw = g_canvas.textWidth(tileName);
+    g_canvas.setCursor(tile.icon_cx - lw / 2, tile.y + tile.h - 28);
+    g_canvas.print(tileName);
+  }
+  // Hint at bottom
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextSize(1);
+  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+
+  // Show a useful screen immediately.  Initialization continues below so the
+  // NFC module and its worker task are actually available to every UI page.
+  pushCanvasToEink(true);
+#else
  auto cfg = M5.config();
 #if defined(APP_TARGET_STICKCPLUS)
   cfg.internal_spk = true;
@@ -6713,8 +7840,8 @@ void setup() {
   M5.Power.setExtOutput(true);
 #endif
   M5.Speaker.setVolume(kSpeakerVolume);
+#endif
 
-  Serial.begin(115200);
   const char* target_name = "Unknown";
 #if defined(APP_TARGET_STICKS3)
   target_name = "M5StickS3";
@@ -6724,6 +7851,8 @@ void setup() {
   target_name = "CardPuter/CardPuterADV";
 #elif defined(APP_TARGET_ATOMS3)
   target_name = "AtomS3";
+#elif defined(APP_TARGET_M5PAPER)
+  target_name = "M5Paper";
 #endif
   Serial.printf("[BOOT] Target=%s SDA=GPIO%d SCL=GPIO%d I2C=0x%02X\n",
                 target_name,
@@ -6732,7 +7861,10 @@ void setup() {
                 grove_nfc::I2C_SLAVE_ADDR);
   Wire.begin(active_sda_pin, active_scl_pin, kI2CFreq);
 
-    M5.Display.setRotation(
+  // Canvas is created in M5Paper-specific setup above (grayscale_8bit)
+  // For other targets, create standard 16-bit canvas here
+#if !defined(APP_TARGET_M5PAPER)
+  M5.Display.setRotation(
   #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
     1
   #else
@@ -6740,10 +7872,9 @@ void setup() {
   #endif
     );
   M5.Display.setFont(&fonts::Font0);
-  // Create off-screen canvas (matches physical display size).
-  // All drawScreen() / animation calls draw here; pushSprite() commits atomically.
   g_canvas.setColorDepth(16);
   g_canvas.createSprite(M5.Display.width(), M5.Display.height());
+#endif
   littlefs_ready = LittleFS.begin(true);
   if (!littlefs_ready) {
     Serial.println("[FS] LittleFS init failed");
@@ -6786,25 +7917,18 @@ void setup() {
   );
   Serial.println("[BOOT] NFC worker started on Core 0");
 
-  // Wait for NFC worker health check, then start MFC1K via command queue
-  delay(2000);
-  if (isNfcUnitMode()) {
-    emu_type = EmuType::MF1K;
-    nfc_w_emu_type = EmuType::MF1K;
-        Serial.println("[BOOT] M1K emulation via autoStartMifare1K...");
-    if (nfc.autoStartMifare1K()) {
-      Serial.println("[BOOT] M1K emulation OK");
-      emu_started = true;
-      nfc_ready = true;
-    } else {
-      Serial.println("[BOOT] M1K emulation FAILED");
-    }
-  }
+  // Keep NFC Unit in reader mode at boot. Entering Emulator starts NTAG213;
+  // entering Reader explicitly restores reader mode first.
+
+#ifdef APP_TARGET_M5PAPER
+  // Refresh after NFC detection so the status bar reports the real module.
+  goHome();
+  Serial.println("[BOOT] Final M5Paper screen refresh done");
+#endif
 }
 
 
 void loop() {
-
 
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   static uint32_t s_cardputer_last_update_ms = 0;
@@ -6812,10 +7936,8 @@ void loop() {
   const bool critical_nfcunit_emu = (nfcunit_active_page && menu_page == MenuPage::Emulator && emu_started);
   uint32_t update_interval_ms = 0;
   if (critical_nfcunit_emu) {
-    // Emulation is most timing-sensitive: keep keyboard polling sparse but still usable.
     update_interval_ms = 220;
   } else if (nfcunit_active_page) {
-    // Reader/NDEF/Piano on Unit NFC can still suffer from I2C contention on CardPuter keyboard scans.
     update_interval_ms = 70;
   }
 
@@ -6826,6 +7948,7 @@ void loop() {
 #else
   M5.update();
 #endif
+
   const KeyNavState key_nav = readKeyNavState();
   const bool nav_prev = key_nav.prev || key_nav.key_b;
   const bool nav_back = key_nav.back;
@@ -6842,9 +7965,30 @@ void loop() {
     btn_hold_latched = false;
   }
 
+#ifdef APP_TARGET_M5PAPER
+  if (handleM5PaperStatusTouch()) {
+    delay(10);
+    return;
+  }
+  if (handleM5PaperFeatureTouch()) {
+    delay(10);
+    return;
+  }
+  if (in_home && handleM5PaperHomeTouch()) {
+    delay(10);
+    return;
+  }
+  static uint32_t s_last_battery_refresh_ms = 0;
+  if (in_home && millis() - s_last_battery_refresh_ms >= 60000) {
+    s_last_battery_refresh_ms = millis();
+    drawScreen();
+  }
+#endif
+
   // Some Unit NFC firmware revisions occasionally fail the first emulation start.
   // Retry periodically while staying on Emulator page until emulation is active.
-  if (!in_home && menu_page == MenuPage::Emulator && nfc_ready && !emu_switch_apply_pending && !emu_started) {
+  if (!in_home && menu_page == MenuPage::Emulator && nfc_ready && !emu_user_stopped &&
+      !emu_switch_apply_pending && !emu_started) {
     const uint32_t now_retry = millis();
     if (now_retry - emu_last_start_retry_ms >= 1000) {
       startCurrentEmulation();
@@ -6867,10 +8011,16 @@ void loop() {
   nfc_w_wifi_popup = wifi_popup;
   nfc_w_piano_stage = piano_stage;
 
-  const bool reader_anim_active = (!in_home && menu_page == MenuPage::Reader && !last_card.valid);
+  const bool reader_anim_active =
+#ifdef APP_TARGET_M5PAPER
+      false;
+#else
+      (!in_home && menu_page == MenuPage::Reader && !last_card.valid);
+#endif
   if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
     const bool anim_running = reader_anim_active;
     if (anim_running) {
+#ifndef APP_TARGET_M5PAPER
       auto& d = M5.Display;
       const int w = d.width();
       const int h = d.height();
@@ -6885,48 +8035,66 @@ void loop() {
       }
 #elif defined(APP_TARGET_ATOMS3)
       drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+#elif !defined(APP_TARGET_M5PAPER)
+      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+#endif
 #endif
     } else {
       last_reader_anim_us = 0;
       if (ui_marquee_active) {
+#ifndef APP_TARGET_M5PAPER
         const uint32_t now = millis();
         if (now - last_ui_scroll_ms >= kUiScrollMs) {
           last_ui_scroll_ms = now;
           drawScreen();
         }
+#endif
       }
     }
   }
 
   if (!in_home && menu_page == MenuPage::Diagnose && diagnose_ok) {
+#ifndef APP_TARGET_M5PAPER
     const uint32_t now = millis();
     if (now - last_diag_scroll_ms >= kDiagScrollMs) {
       last_diag_scroll_ms = now;
       drawScreen();
     }
+#endif
   }
 
   if (!in_home && menu_page == MenuPage::Emulator && emu_config_stage == EmuConfigStage::None) {
     if (emu_type_anim_active) {
+#ifdef APP_TARGET_M5PAPER
+      emu_type_anim_active = false;
+      drawScreen();
+#else
       const uint32_t now = millis();
       if (last_emu_anim_ms == 0 || now - last_emu_anim_ms >= 16) {
         last_emu_anim_ms = now;
         drawScreen();
       }
+#endif
     } else if (emu_switch_apply_pending) {
       emu_switch_apply_pending = false;
       startCurrentEmulation();
     } else {
       // Periodic redraw for UID marquee scrolling
+#ifndef APP_TARGET_M5PAPER
       const uint32_t now = millis();
       if (now - last_ui_scroll_ms >= kUiScrollMs) {
         last_ui_scroll_ms = now;
         drawScreen();
       }
+#endif
     }
   }
 
   if (in_home && home_anim_active) {
+#ifdef APP_TARGET_M5PAPER
+    home_anim_active = false;
+    drawScreen();
+#else
     const uint32_t now = millis();
     if (now - home_anim_start_ms >= home_anim_duration_ms) {
       home_anim_active = false;
@@ -6934,6 +8102,7 @@ void loop() {
     drawScreen();
     delay(10);
     return;
+#endif
   }
 
   // Clear arrow flash when it expires
@@ -7131,10 +8300,10 @@ void loop() {
         dumps_stage = DumpsStage::Browse;
         drawScreen();
       } else if (clicked || key_nav.next || key_nav.confirm) {
-        const int view_w = M5.Display.width() - 4;
-        const int view_h = M5.Display.height() - 18;
+        const int view_w = g_canvas.width() - 4;
+        const int view_h = g_canvas.height() - 18;
         int line_h = 10;
-        dumpsPreviewApplyFont(M5.Display, dumps_preview_font_level, line_h);
+        dumpsPreviewApplyFont(g_canvas, dumps_preview_font_level, line_h);
         const size_t page_lines = dumpsPreviewPageLines(max(20, view_h), line_h);
         const size_t total_lines = dumpsPreviewCountLines(dumps_preview_text);
         if (total_lines <= page_lines) {
