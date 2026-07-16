@@ -7895,10 +7895,17 @@ void setup() {
   diagnose_report = "Press hold to run check";
   last_reader_success_ms = millis();
 
+#if defined(APP_TARGET_M5PAPER)
+  // The boot diagnostic is a temporary text page designed for small
+  // button-driven displays. M5Pager already has a full touch home screen, so
+  // never expose Diagnose during startup.
+  drawScreen();
+#else
   runBootDebugFlow();
   // runBootDebugFlow() calls goHome() → drawScreen() when kAutoBootDebug=true.
   // If boot debug is disabled, draw the initial screen here.
   if (!kAutoBootDebug) drawScreen();
+#endif
 
   // Start NFC worker task on Core 0
   nfc_mutex = xSemaphoreCreateMutex();

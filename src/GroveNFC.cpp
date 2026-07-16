@@ -396,6 +396,20 @@ struct GroveNFC::NfcUnitBridge {
   NfcUnitBridge()
     : nfc_a(unit), nfc_v(unit), nfc_b(unit), emu_a(unit), emu_f(unit), emu_m1k(unit) {}
 
+  static String iso15Detail(const m5::nfc::v::PICC& picc) {
+    char info[160]{};
+    snprintf(info, sizeof(info),
+             "%s | %u blocks x %u B | %u bytes | AFI %02X | DSFID %02X | IC Ref %02X",
+             picc.typeAsString().c_str(),
+             static_cast<unsigned>(picc.blocks),
+             static_cast<unsigned>(picc.block_size),
+             static_cast<unsigned>(picc.totalSize()),
+             static_cast<unsigned>(picc.afi),
+             static_cast<unsigned>(picc.dsfID),
+             static_cast<unsigned>(picc.icReference()));
+    return String(info);
+  }
+
   bool loadDump(DumpTagType type, const uint8_t* data, size_t len) {
     if (!data || len == 0) return false;
 
@@ -448,11 +462,30 @@ struct GroveNFC::NfcUnitBridge {
     }
   }
 
-  // Only switch RF mode when actually needed.
-  void switchMode(m5::nfc::NFC mode) {
-    if (!unit.isNFCMode(mode)) {
-      unit.configureNFCMode(mode);
+  // Switch RF technology. Some M5Unit-NFC/ST25R3916 combinations fail the
+  // live A <-> V transition even though fixed-mode initialization works. The
+  // StickS3 diagnostic reproduces that failure, so fall back to beginning the
+  // registered unit again with the requested reader mode.
+  bool switchMode(m5::nfc::NFC mode) {
+    if (unit.isNFCMode(mode)) return true;
+    if (unit.configureNFCMode(mode)) {
+      units.update();
+      m5::utility::delay(12);
+      return true;
     }
+
+    auto cfg = unit.config();
+    cfg.emulation = false;
+    cfg.mode = mode;
+    unit.config(cfg);
+    Serial.printf("[NFC-UNIT] mode %u live switch failed; reinitializing\n",
+                  static_cast<unsigned>(mode));
+    const bool ok = unit.begin();
+    units.update();
+    m5::utility::delay(20);
+    Serial.printf("[NFC-UNIT] mode %u reinit=%d\n",
+                  static_cast<unsigned>(mode), static_cast<int>(ok));
+    return ok;
   }
 
   // Detect ISO14443B card, select (ATTRIB), and try GET UID APDU to obtain real UID.
@@ -870,8 +903,7 @@ struct GroveNFC::NfcUnitBridge {
 
     // --- Presence check for previously seen ISO15693 card ---
     if (has_last_picc_v) {
-      switchMode(m5::nfc::NFC::V);
-      if (nfc_v.reactivate(last_picc_v)) {
+      if (switchMode(m5::nfc::NFC::V) && nfc_v.reactivate(last_picc_v)) {
         nfc_v.deactivate();
         switchMode(m5::nfc::NFC::A);
         card = last_card_info;
@@ -884,7 +916,7 @@ struct GroveNFC::NfcUnitBridge {
     }
 
     // --- Scan for new ISO14443A card ---
-    switchMode(m5::nfc::NFC::A);
+    if (!switchMode(m5::nfc::NFC::A)) return false;
     {
       m5::nfc::a::PICC picc{};
       if (nfc_a.detect(picc)) {
@@ -906,6 +938,10 @@ struct GroveNFC::NfcUnitBridge {
           return true;
         }
       }
+      // Ensure a complete RF-off edge before changing RF technology. This is
+      // also required when detect() found no active PICC.
+      nfc_a.deactivate();
+      m5::utility::delay(8);
     }
 
     // --- Scan for new ISO15693 card (throttled) ---
@@ -915,21 +951,30 @@ struct GroveNFC::NfcUnitBridge {
     }
     v_scan_counter = 0;
 
-    switchMode(m5::nfc::NFC::V);
+    if (!switchMode(m5::nfc::NFC::V)) {
+      switchMode(m5::nfc::NFC::A);
+      return false;
+    }
     m5::utility::delay(10);  // RF field settle time for ISO15693
     {
       m5::nfc::v::PICC picc{};
       if (nfc_v.detect(picc, 200)) {  // 200 ms – enough for one Inventory round-trip
         last_card_info.protocol = "ISO15693";
         last_card_info.uid = String(picc.uidAsString().c_str());
-        last_card_info.detail = String(picc.typeAsString().c_str());
+        // detect() already issues Get System Information and populates the
+        // memory geometry, AFI, DSFID and IC reference fields.
+        last_card_info.detail = iso15Detail(picc);
         last_card_info.valid = true;
         last_picc_v = picc;
         has_last_picc_v = true;
+        nfc_v.deactivate();
+        m5::utility::delay(8);
         switchMode(m5::nfc::NFC::A);
         card = last_card_info;
         return true;
       }
+      nfc_v.deactivate();
+      m5::utility::delay(8);
     }
 
     // --- Scan for new ISO14443B card ---
