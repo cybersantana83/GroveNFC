@@ -92,9 +92,15 @@ constexpr uint32_t kDiagScrollMs = 800;
 constexpr uint32_t kUiScrollMs = 260;
 constexpr uint32_t kReaderAnimStepUs = 8000;
 constexpr uint32_t kReaderSweepUs = 820000;
-// Diagnostics remain available from the menu, but must never replace the
-// first normal application screen on any target.
-constexpr bool kAutoBootDebug = false;
+// Keep the compact system-style boot sequence on button-driven displays.
+// M5Paper goes directly to its touch home screen without a Diagnose splash.
+constexpr bool kAutoBootDebug =
+#if defined(APP_TARGET_M5PAPER)
+  false
+#else
+  true
+#endif
+;
 constexpr uint32_t kBootDebugShowMs = 2500;
 constexpr uint8_t kSpeakerVolume = 160;
 constexpr uint8_t kEmuActionCount = 2;
@@ -238,7 +244,11 @@ MenuPage menu_page = MenuPage::Reader;
 EmuType emu_type = EmuType::N213;
 EmuType emu_menu_type = EmuType::N213;
 EmuConfigStage emu_config_stage = EmuConfigStage::None;
-int home_index = -1;
+#ifdef APP_TARGET_M5PAPER
+int home_index = -1;  // No tile selected until the first touch.
+#else
+int home_index = 0;   // The initial visible page is Reader (home item 0).
+#endif
 int emu_menu_index = 0;
 uint8_t emu_type_cursor = 0;
 uint8_t emu_type_scroll = 0;
@@ -336,6 +346,9 @@ bool reader_14b_only = false;
 uint32_t reader_last_hold_log_ms = 0;
 uint8_t reader_fail_streak = 0;
 String nfc_module_name = "GroveNFC";
+#ifdef APP_TARGET_M5PAPER
+String nfc_port_name = "Port A";
+#endif
 Preferences prefs;
 bool emu_dump_restore_checked[static_cast<uint8_t>(EmuType::Count)] = {false};
 String emu_dump_loaded_path[static_cast<uint8_t>(EmuType::Count)];
@@ -1224,8 +1237,10 @@ const char* emuTypeShort(EmuType type) {
 
 String emulatorDisplayId(EmuType type, uint8_t slot) {
   String base;
-  if (type == EmuType::MF1K || type == EmuType::MF4K) {
+  if (type == EmuType::MF1K) {
     base = "6117C420";
+  } else if (type == EmuType::MF4K) {
+    base = "041219C3CC9802";
   } else if (type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216) {
     base = "04311D01174503";
   } else if (type == EmuType::ISO14B) {
@@ -2288,9 +2303,10 @@ String deriveEmuUidFromDump(EmuType type, const uint8_t* dump, size_t dump_len) 
 
   switch (type) {
     case EmuType::MF1K:
-    case EmuType::MF4K:
       if (dump_len >= 4) return bytesToHexUpper(dump, 4);
       break;
+    case EmuType::MF4K:
+      return "041219C3CC9802";
     case EmuType::N213:
     case EmuType::N215:
     case EmuType::N216:
@@ -4167,6 +4183,13 @@ void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
 
 String readerTypeLabel(const grove_nfc::CardInfo& card, bool only_14b) {
   if (card.valid) {
+    if (card.protocol == "ISO15693" && !card.detail.isEmpty()) {
+      String type = card.detail;
+      const int separator = type.indexOf(" | ");
+      if (separator >= 0) type = type.substring(0, separator);
+      type.trim();
+      if (!type.isEmpty()) return type;
+    }
     return String(protocolFull(card.protocol));
   }
   return only_14b ? String("SCAN 14B") : String("SCANNING");
@@ -4936,7 +4959,7 @@ static void drawM5PaperReaderPage() {
     g_canvas.print("PROTOCOL");
     g_canvas.setTextSize(3);
     g_canvas.setCursor(card_x + 28, card_y + 148);
-    g_canvas.print(protocolFull(last_card.protocol));
+    g_canvas.print(readerTypeLabel(last_card, false));
     g_canvas.setTextSize(2);
     g_canvas.setCursor(card_x + 28, card_y + 230);
     g_canvas.print("UID / IDENTIFIER");
@@ -5070,8 +5093,11 @@ void drawM5PaperEmulatorHexTable(lgfx::v1::LGFXBase& d) {
     const int rw = two_columns ? col_w : w - 20;
     if ((row & 1) == 0) d.fillRect(rx, ry - 3, rw, row_h, 0xDEFB);
     d.setTextColor(TFT_BLACK, (row & 1) == 0 ? 0xDEFB : TFT_WHITE);
-    d.setTextSize(two_columns ? 2 : 1);
-    d.setCursor(rx + 7, ry + (two_columns ? 3 : 8));
+    // A MIFARE block is 16 bytes: index + 32 HEX digits still fits the full
+    // 492px single-column table at TextSize 2, so do not compress it to the
+    // half-width-looking small font used previously.
+    d.setTextSize(2);
+    d.setCursor(rx + 7, ry + 3);
     d.print(display);
   }
   if (two_columns) d.drawLine(x + w / 2, y + header_h, x + w / 2, y + h - 5, TFT_LIGHTGREY);
@@ -5376,10 +5402,12 @@ static void drawM5PaperAboutPage() {
   g_canvas.setCursor(28, 620);
   g_canvas.print("SUPPORTED EMULATION");
   drawM5PaperPixelWrappedText(28, 658, w - 56, 32, 5,
-                              "MIFARE Classic 1K, NTAG213, NTAG215, NTAG216, ISO14443B, FeliCa and ISO15693. JSON/BIN dumps can be loaded from LittleFS.");
+                              "MIFARE Classic 1K/4K, NTAG213, NTAG215, NTAG216, ISO14443B, FeliCa and ISO15693. JSON/BIN dumps can be loaded from LittleFS.");
   g_canvas.setTextSize(2);
   g_canvas.setCursor(28, 870);
-  g_canvas.printf("Module: %s   HW:%04X FW:%04X", nfc_module_name.c_str(), hw_ver, fw_ver);
+  g_canvas.printf("Module: %s  %s", nfc_module_name.c_str(), nfc_port_name.c_str());
+  g_canvas.setCursor(28, 896);
+  g_canvas.printf("HW:%04X  FW:%04X", hw_ver, fw_ver);
 }
 #endif
  
@@ -5629,10 +5657,12 @@ void drawScreen(bool popup_only) {
         d.setTextSize(2);
         const int name_y = h - 20;
 
-        // "From" text: slide + fade — alpha sync with icon (use eased directly)
+        // Show only one label at a time. The old label owns the first half of
+        // the slide and the new label owns the second half, preventing two
+        // identical names from being visible during a wrap-around transition.
         {
           const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
-          if (a > 4) {
+          if (eased < 0.5f && a > 4) {
             const int nw = d.textWidth(name_from);
             d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
             d.setCursor(from_tx - nw / 2, name_y);
@@ -5640,11 +5670,11 @@ void drawScreen(bool popup_only) {
           }
         }
 
-        // "To" text: slide + fade — appears much slower
+        // "To" text: slide + fade in during the second half only.
         {
-          const float reveal_t = max(0.0f, min(1.0f, (text_eased - 0.55f) / 0.45f));
+          const float reveal_t = max(0.0f, min(1.0f, (eased - 0.5f) * 2.0f));
           const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal_t * 255.0f)));
-          if (a > 4) {
+          if (eased >= 0.5f && a > 4) {
             const int nw = d.textWidth(name_to);
             d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
             d.setCursor(to_tx - nw / 2, name_y);
@@ -6046,8 +6076,9 @@ void drawScreen(bool popup_only) {
     hd.setCursor(4, 5);
     hd.print("GroveNFC");
     hd.setTextSize(1);
-    hd.setCursor(screen_w - 102, 8);
-    hd.print(nfc_module_name);
+    const String module_port = nfc_module_name + " " + nfc_port_name;
+    hd.setCursor(screen_w - hd.textWidth(module_port) - 4, 8);
+    hd.print(module_port);
 
     const int items = homePageCount();
     for (int i = 0; i < items; ++i) {
@@ -6230,7 +6261,7 @@ void drawScreen(bool popup_only) {
   if (menu_page == MenuPage::Reader) {
     sub_title_line = "Reader";
     if (last_card.valid) {
-      title_line = String(protocolFull(last_card.protocol));
+      title_line = readerTypeLabel(last_card, reader_14b_only);
     } else {
       title_line = reader_14b_only ? String("Scan 14B") : String("Scanning");
     }
@@ -6703,7 +6734,12 @@ bool recoverNfc(const char* reason, bool rebegin) {
 
 bool initNfcAtBoot() {
   auto beginWireWithActivePins = [&]() {
-#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
+#if defined(APP_TARGET_M5PAPER)
+    Wire.end();
+    delay(2);
+    Wire.begin(active_sda_pin, active_scl_pin, kI2CFreq);
+    delay(8);
+#elif defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
   Wire.begin(active_sda_pin, active_scl_pin, kI2CFreq);
     delay(5);
 #endif
@@ -6728,6 +6764,32 @@ bool initNfcAtBoot() {
 
   delay(kNfcBootPowerSettleMs);
 
+#if defined(APP_TARGET_M5PAPER)
+  struct M5PaperPortPins {
+    const char* name;
+    int sda;
+    int scl;
+  };
+  static constexpr M5PaperPortPins ports[] = {
+      {"Port A", 25, 32},
+      {"Port B", 26, 33},
+      {"Port C", 18, 19},
+  };
+  for (const auto& port : ports) {
+    active_sda_pin = port.sda;
+    active_scl_pin = port.scl;
+    nfc_port_name = port.name;
+    Serial.printf("[BOOT] NFC probe %s SDA=GPIO%d SCL=GPIO%d\n",
+                  port.name, port.sda, port.scl);
+    beginWireWithActivePins();
+    if (tryInit()) {
+      Serial.printf("[BOOT] NFC found on %s\n", port.name);
+      return true;
+    }
+  }
+  nfc_port_name = "No Port";
+  return false;
+#else
   if (tryInit()) return true;
 
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
@@ -6744,6 +6806,7 @@ bool initNfcAtBoot() {
 #endif
 
   return false;
+#endif
 }
 
 void stopAllModes() {
@@ -6753,13 +6816,18 @@ void stopAllModes() {
 
 void goHome() {
   in_home = true;
+  menu_page = MenuPage::Reader;
   wifi_popup = false;
   emu_config_stage = EmuConfigStage::None;
   emu_show_menu = false;
   emu_switch_apply_pending = false;
   dumps_stage = DumpsStage::Browse;
   dumps_pick_for_emu = false;
+#ifdef APP_TARGET_M5PAPER
   home_index = -1;
+#else
+  home_index = 0;
+#endif
   setSpeaker5V(false);
   drawScreen();
 }
@@ -6796,7 +6864,9 @@ void enterCurrentFeature() {
     last_ndef_auto_ms = 0;
   } else if (menu_page == MenuPage::Emulator) {
     emu_switch_apply_pending = false;
-    emu_type = EmuType::N213;  // Default NTAG213
+    // GroveNFC has native MIFARE Classic tag modes. NFC Unit keeps NTAG213
+    // because its Classic emulation backend is intentionally unavailable.
+    emu_type = isNfcUnitMode() ? EmuType::N213 : EmuType::MF1K;
     emu_menu_index = 1;
     emu_show_menu = false;
     const String saved_path = loadLastDumpForType(emu_type);
@@ -7767,6 +7837,7 @@ void processHealthResult() {
   nfc_health_result.new_result = false;
 
   if (lost) {
+    home_anim_active = false;
     emu_started = false;
     last_card.valid = false;
     last_card.protocol = "None";
@@ -7776,6 +7847,7 @@ void processHealthResult() {
     drawScreen();
   }
   if (reconnected) {
+    home_anim_active = false;
     hw_ver = nhw;
     fw_ver = nfw;
     nfc_module_name = nfc.deviceName();

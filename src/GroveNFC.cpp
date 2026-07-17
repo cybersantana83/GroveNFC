@@ -10,6 +10,43 @@
 
 namespace grove_nfc {
 
+// ISO15693 UID in display/MSB-first order: E0, manufacturer, IC identifier, ...
+// Returns the generic protocol name when the UID does not match a known type.
+static const char* iso15_type_from_uid(const uint8_t uid[8]) {
+  if (!uid || uid[0] != 0xE0) return "ISO15693";
+
+  if (uid[1] == 0x07) {  // Texas Instruments
+    switch (uid[2]) {
+      case 0x00:
+      case 0x01:
+      case 0x80:
+      case 0x81:
+      case 0xC0:
+      case 0xC1:
+      case 0xC4:
+      case 0xC5:
+        return "Tag-it HF-I PLUS";
+      default:
+        break;
+    }
+  } else if (uid[1] == 0x04) {  // NXP
+    if (uid[2] == 0x01) {
+      switch (uid[3] & 0x18) {
+        case 0x00: return "ICODE SLI";
+        case 0x08: return "ICODE SLIX2";
+        case 0x10: return "ICODE SLIX";
+        default: break;
+      }
+    } else if (uid[2] == 0x03) {
+      return "ICODE SLIX-L";
+    }
+  } else if (uid[1] == 0x02) {  // STMicroelectronics
+    return "LRI2K";
+  }
+
+  return "ISO15693";
+}
+
 #if GROVENFC_HAS_M5UNIT_BACKEND
 
 // Map M5UnitNFC ISO14443A type enum → the protocol string used by the app's
@@ -396,11 +433,26 @@ struct GroveNFC::NfcUnitBridge {
   NfcUnitBridge()
     : nfc_a(unit), nfc_v(unit), nfc_b(unit), emu_a(unit), emu_f(unit), emu_m1k(unit) {}
 
+  static String iso15TypeName(const m5::nfc::v::PICC& picc) {
+    const String mapped = iso15_type_from_uid(picc.uid);
+    if (mapped != "ISO15693") return mapped;
+
+    // Preserve the library's broader recognition (for example ST25V/ST25DV)
+    // but never expose its Unknown/Unclassified internal labels to Reader.
+    const String library_type(picc.typeAsString().c_str());
+    if (!library_type.isEmpty() && library_type != "Unknown" &&
+        library_type.indexOf("Unclassified") < 0) {
+      return library_type;
+    }
+    return "ISO15693";
+  }
+
   static String iso15Detail(const m5::nfc::v::PICC& picc) {
     char info[160]{};
+    const String type_name = iso15TypeName(picc);
     snprintf(info, sizeof(info),
              "%s | %u blocks x %u B | %u bytes | AFI %02X | DSFID %02X | IC Ref %02X",
-             picc.typeAsString().c_str(),
+             type_name.c_str(),
              static_cast<unsigned>(picc.blocks),
              static_cast<unsigned>(picc.block_size),
              static_cast<unsigned>(picc.totalSize()),
@@ -1009,7 +1061,7 @@ constexpr uint16_t kTagAddrNtag213 = 0x0000;
 constexpr uint16_t kTagAddrNtag215 = 0x1000;
 constexpr uint16_t kTagAddrNtag216 = 0x2000;
 constexpr uint16_t kTagAddrMifare1k = 0x3000;
-constexpr uint16_t kTagAddrMifare4k = 0x5000;
+constexpr uint16_t kTagAddrMifare4k = 0x6000;
 constexpr uint16_t kTagAddr14B = 0x4000;  // dedicated address, avoids conflict with kTagAddrNtag213
 constexpr uint16_t kTagAddrISO15 = 0x7000;
 constexpr size_t kNtag213ImageSize = 180;
@@ -1049,6 +1101,14 @@ const uint8_t kNtag213Header[] = {
 
   const uint8_t kMifareOne4B1KHeader[] = {
     0x64, 0x5E, 0xE5, 0x6A, 0xB5, 0x08, 0x04, 0x00, 0x04, 0x48, 0xE5, 0x87, 0x7D, 0x91, 0xD9, 0x90,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x80, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  };
+
+  // Vendor 7-byte UID MIFARE Classic 4K profile (ATQA 0x0042, SAK 0x18).
+  const uint8_t kMifareOne7B4KHeader[] = {
+    0x04, 0x12, 0x19, 0xC3, 0xCC, 0x98, 0x02, 0x00, 0x64, 0x8E, 0x85, 0x94, 0x41, 0x10, 0x38, 0x07,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x80, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -1500,13 +1560,17 @@ bool GroveNFC::writeEepromImage(uint16_t tag_addr, const uint8_t* data, size_t l
     if (mifare && off == 0) {
       memset(mfc_sector0, 0, sizeof(mfc_sector0));
       memcpy(mfc_sector0, data, min(n, len));
-      // GroveNFC derives the anticollision response directly from block 0.
-      // Normalize metadata just like the working StickS3 MFC1K profile:
-      // 4-byte UID, valid BCC, SAK 08 and ATQA 0004 (stored little-endian).
-      mfc_sector0[4] = mfc_sector0[0] ^ mfc_sector0[1] ^ mfc_sector0[2] ^ mfc_sector0[3];
-      mfc_sector0[5] = mifare1k ? 0x08 : 0x18;
-      mfc_sector0[6] = mifare1k ? 0x04 : 0x02;
-      mfc_sector0[7] = 0x00;
+      if (mifare4k) {
+        // MFC4K uses the module's dedicated 7-byte anticollision layout.
+        // Preserve dump payload after block 0 while replacing its first
+        // sector with the vendor-valid 7-byte UID/manufacturer profile.
+        memcpy(mfc_sector0, kMifareOne7B4KHeader, sizeof(kMifareOne7B4KHeader));
+      } else {
+        mfc_sector0[4] = mfc_sector0[0] ^ mfc_sector0[1] ^ mfc_sector0[2] ^ mfc_sector0[3];
+        mfc_sector0[5] = 0x08;
+        mfc_sector0[6] = 0x04;
+        mfc_sector0[7] = 0x00;
+      }
       src = mfc_sector0;
     }
     if (!writeData(static_cast<uint16_t>(I2cEpromReg_Addr + off), src, static_cast<uint16_t>(n))) {
@@ -1622,7 +1686,7 @@ bool GroveNFC::startEmulationMifare4K() {
   delay(10);
   if (!writeSysReg(I2cSysReg_SetTagAddr_Addr, kTagAddrMifare4k)) return false;
   delay(10);
-  const uint16_t expected_mode = SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_MIFARE1_4B4K;
+  const uint16_t expected_mode = SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_MIFARE1_7B4K;
   if (!writeSysReg(I2cSysReg_SetMode_Addr, expected_mode)) return false;
   delay(10);
   const uint16_t mode_back = readSysReg(I2cSysReg_SetMode_Addr);
@@ -2336,7 +2400,11 @@ bool GroveNFC::readISO15(CardInfo& card) {
   card.protocol = "ISO15693";
   card.uid = bytesToHex(&rx[2], 8, true);
   card.valid = true;
-  card.detail = "Inventory";
+  // Inventory returns the UID least-significant byte first; normalize it to
+  // the same MSB-first layout used by the NFC Unit classifier.
+  uint8_t uid_msb[8]{};
+  for (uint8_t i = 0; i < 8; ++i) uid_msb[i] = rx[9 - i];
+  card.detail = iso15_type_from_uid(uid_msb);
   return true;
 }
 
@@ -2588,13 +2656,9 @@ bool GroveNFC::writeMifare1KImage() {
 }
 
 bool GroveNFC::writeMifare4KImage() {
-  uint8_t header[sizeof(kMifareOne4B1KHeader)] = {0};
-  memcpy(header, kMifareOne4B1KHeader, sizeof(header));
-  header[3] = applyLowNibbleSlot(header[3], slot_index_);
-  header[4] = header[0] ^ header[1] ^ header[2] ^ header[3];
-  header[5] = 0x18;  // MIFARE Classic 4K SAK
-  header[6] = 0x02;  // ATQA 0x0200, stored little-endian
-  header[7] = 0x00;
+  uint8_t header[sizeof(kMifareOne7B4KHeader)] = {0};
+  memcpy(header, kMifareOne7B4KHeader, sizeof(header));
+  header[6] = applyLowNibbleSlot(header[6], slot_index_);
 
   if (!writeSysReg(I2cSysReg_SetMode_Addr,
                    SYS_REG_MODE_DEFAULT | SYS_REG_MODE_TAG_NONE)) return false;

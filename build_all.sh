@@ -87,6 +87,7 @@ define_env_params() {
     m5stack-sticks3)   echo "esp32s3,dio,80m,8MB,0x0000" ;;
     m5stack-stickcplus) echo "esp32,dio,40m,4MB,0x1000" ;;
     m5stack-cardputer) echo "esp32s3,dio,80m,8MB,0x0000" ;;
+    m5stack-m5paper)   echo "esp32,dio,40m,16MB,0x1000" ;;
     *) echo "" ;;
   esac
 }

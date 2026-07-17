@@ -38,6 +38,7 @@ constexpr uint16_t SYS_REG_MODE_TAG_NTAG215 = 0x0002;
 constexpr uint16_t SYS_REG_MODE_TAG_NTAG216 = 0x0003;
 constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B1K = 0x0004;
 constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B4K = 0x0006;
+constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_7B4K = 0x0007;
 constexpr uint16_t SYS_REG_MODE_TAGIT_HF_I_Plus = 0x000C;
 constexpr uint16_t SYS_REG_MODE_TAG_CHINA_II = 0x0020;
 
