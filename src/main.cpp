@@ -8082,20 +8082,26 @@ void setup() {
   }
   loadPianoConfig();
 
-  // [FORK] Diagnostic: scan I2C bus before the fixed-address init, to
-  // confirm which NFC/RFID chip is actually attached (0x48 = ST25R3916
-  // "Unit NFC", 0x28 = WS1850S "RFID Unit 2"). Remove once auto-detect
-  // lands for real (ROADMAP.md, Fase 1.5).
+  bool found_st25r3916 = false;
+  bool found_ws1850s = false;
   Serial.println("[SCAN] Starting I2C bus scan...");
   for (uint8_t addr = 1; addr < 127; ++addr) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       Serial.printf("[SCAN] Device found at 0x%02X\n", addr);
+      if (addr == 0x48) found_st25r3916 = true;
+      if (addr == 0x28) found_ws1850s = true;
     }
   }
   Serial.println("[SCAN] Done.");
 
-  nfc_ready = initNfcAtBoot();
+  if (found_ws1850s && !found_st25r3916) {
+    nfc_ready = false;
+    boot_notice_line = "WS1850S: chip nao suportado";
+    Serial.println("[BOOT] WS1850S detected - unsupported chip, skipping NFC init");
+  } else {
+    nfc_ready = initNfcAtBoot();
+  }
   nfc_module_name = nfc_ready ? String(nfc.deviceName()) : String("GroveNFC");
   hw_ver = nfc.hardwareVersion();
   fw_ver = nfc.firmwareVersion();
