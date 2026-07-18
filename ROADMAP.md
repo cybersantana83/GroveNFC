@@ -43,6 +43,36 @@ Python soltos.
       (ex: StickS3 usa `BtnA` pra próximo/confirmar e `BtnPWR`/`BtnB`
       pra voltar — isso hoje não está escrito em lugar nenhum).
 
+## Fase 1.5 — Suporte a múltiplos chips NFC (achado durante debug do StickS3)
+
+Contexto: o `NFC Fail` no StickS3 não era bug de boot/energia — era o módulo
+físico errado. O GroveNFC foi escrito só pro chip `ST25R3916` (produto M5
+"Unit NFC", I2C `0x48`). Quem conectar o `RFID Unit 2` (chip `WS1850S`,
+I2C `0x28` — outro produto M5, mesmo conector Grove) recebe `NFC Fail` sem
+nenhuma pista de que o chip é incompatível, porque o driver simplesmente
+não reconhece o endereço.
+
+- [ ] **Auto-detecção de chip no boot**: scan rápido de I2C logo no início
+      (`initNfcAtBoot()`). Se achar `0x48` → carrega o driver ST25R3916
+      atual. Se achar `0x28` → carrega driver WS1850S (ver item abaixo).
+      Sem isso, cada usuário com o módulo "errado" repete o mesmo debug
+      do zero.
+- [ ] **Driver WS1850S**: o WS1850S é compatível a nível de comando com a
+      família MFRC522 — dá pra reaproveitar uma lib tipo `MFRC522_I2C`
+      em vez de escrever do zero. Cobre ISO14443A/MIFARE/NTAG.
+- [ ] **Aviso de limitação na UI e no README**, específico por chip
+      detectado:
+      - `WS1850S`: ISO14443A, MIFARE, NTAG. **Sem** FeliCa, ISO15693, e
+        **sem** emulação completa (o WS1850S não suporta os modos de
+        emulação que o firmware demonstra pro ST25R3916).
+      - `ST25R3916`: capacidade completa (é o que o firmware original já
+        cobre) — FeliCa, ISO15693, emulação MIFARE 1K/NTAG213/215/216/etc.
+      Objetivo: quem usar o fork com o módulo "errado" vê um aviso
+      informativo em vez de `NFC Fail` genérico.
+- [ ] Atualizar README com uma tabela clara dos dois produtos M5
+      (nome comercial, chip, endereço I2C, protocolos suportados), já
+      que hoje nada no repo avisa que "GroveNFC" mira um chip específico.
+
 ## Fase 2 — Arquitetura de módulos (onde entram os projetos pessoais)
 
 Ideia: manter a separação de camadas que o repo original já tem
