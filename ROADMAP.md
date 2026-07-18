@@ -52,14 +52,18 @@ I2C `0x28` — outro produto M5, mesmo conector Grove) recebe `NFC Fail` sem
 nenhuma pista de que o chip é incompatível, porque o driver simplesmente
 não reconhece o endereço.
 
-- [ ] **Auto-detecção de chip no boot**: scan rápido de I2C logo no início
-      (`initNfcAtBoot()`). Se achar `0x48` → carrega o driver ST25R3916
-      atual. Se achar `0x28` → carrega driver WS1850S (ver item abaixo).
-      Sem isso, cada usuário com o módulo "errado" repete o mesmo debug
-      do zero.
+- [x] **Auto-detecção de chip no boot**: scan de I2C em `setup()`, antes do
+      `initNfcAtBoot()`. Confirmado com hardware real: `0x28` = WS1850S,
+      nada em `0x48`. Aviso amigável (`boot_notice_line`) no lugar do
+      `NFC FAIL` genérico, sem sobrescrever o notice no `runBootDebugFlow()`,
+      e sem I2C error spam nas leituras de hw/fw version quando `nfc_ready`
+      é `false`. Commits: ver histórico da branch `santana/fork-base`.
 - [ ] **Driver WS1850S**: o WS1850S é compatível a nível de comando com a
       família MFRC522 — dá pra reaproveitar uma lib tipo `MFRC522_I2C`
       em vez de escrever do zero. Cobre ISO14443A/MIFARE/NTAG.
+      Bloqueado até o módulo "Unit NFC" (ST25R3916) chegar (~06/08) —
+      preciso dos dois lado a lado pra não quebrar o caminho ST25R3916
+      já funcional enquanto adiciono o WS1850S.
 - [ ] **Aviso de limitação na UI e no README**, específico por chip
       detectado:
       - `WS1850S`: ISO14443A, MIFARE, NTAG. **Sem** FeliCa, ISO15693, e
