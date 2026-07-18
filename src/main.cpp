@@ -255,6 +255,7 @@ uint8_t emu_type_scroll = 0;
 grove_nfc::CardInfo last_card;
 uint32_t last_poll_ms = 0;
 bool nfc_ready = false;
+bool nfc_chip_unsupported = false;  // [FORK] true when a known-incompatible chip (e.g. WS1850S) was detected
 bool emu_started = false;
 bool emu_user_stopped = false;
 uint32_t emu_last_start_retry_ms = 0;
@@ -7604,7 +7605,7 @@ void nfcWorkerTask(void* /*param*/) {
             }
           }
         }
-      } else {
+      } else if (!nfc_chip_unsupported) {
         if (now - w_last_reconnect_ms >= kNfcReconnectMs) {
           w_last_reconnect_ms = now;
           if (nfc.begin()) {
@@ -8101,6 +8102,7 @@ void setup() {
 
   if (found_ws1850s && !found_st25r3916) {
     nfc_ready = false;
+    nfc_chip_unsupported = true;
     boot_notice_line = "WS1850S: chip nao suportado";
     Serial.println("[BOOT] WS1850S detected - unsupported chip, skipping NFC init");
   } else {
