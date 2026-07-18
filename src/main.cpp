@@ -8026,7 +8026,14 @@ void setup() {
   M5.begin(cfg);
 #endif
 #if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
+  // [FORK] Diagnostic: confirm M5Unified actually auto-detected this board.
+  // If board_id comes back as 0/unknown instead of the expected M5Stack enum,
+  // setExtOutput() silently no-ops on some PMIC-gated boards (e.g. StickS3),
+  // which looks identical to a wiring/power problem from the outside.
+  Serial.printf("[BOOT] M5.getBoard() = %d\n", (int)M5.getBoard());
   M5.Power.setExtOutput(true);
+  delay(50);
+  Serial.printf("[BOOT] setExtOutput(true) issued\n");
 #endif
   M5.Speaker.setVolume(kSpeakerVolume);
 #endif
