@@ -7108,7 +7108,11 @@ void runBootDebugFlow() {
   drawLine(String("[BOOT] ") + nfc_module_name, TFT_GREEN, 150);
   if (!nfc_ready) {
     drawLine("[FAIL] NFC not ready", TFT_RED, 1500);
-    boot_notice_line = "NFC FAIL";
+    // [FORK] Don't clobber a more specific notice (e.g. WS1850S detection)
+    // that was already set before this generic boot-debug flow ran.
+    if (boot_notice_line.isEmpty()) {
+      boot_notice_line = "NFC FAIL";
+    }
     boot_debug_running = false;
     goHome();
     return;
