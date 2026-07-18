@@ -8109,8 +8109,10 @@ void setup() {
     nfc_ready = initNfcAtBoot();
   }
   nfc_module_name = nfc_ready ? String(nfc.deviceName()) : String("GroveNFC");
-  hw_ver = nfc.hardwareVersion();
-  fw_ver = nfc.firmwareVersion();
+  if (nfc_ready) {
+    hw_ver = nfc.hardwareVersion();
+    fw_ver = nfc.firmwareVersion();
+  }
   last_card.protocol = "None";
   last_card.detail = nfc_ready ? "Waiting card..." : "No NFC module";
   diagnose_report = "Press hold to run check";
