@@ -14,23 +14,25 @@ Python soltos.
 - Nada impede de mandar patches pontuais pro upstream depois, se o autor
   abrir espaço pra isso.
 
-## Fase 0 — Estabilizar a base (bloqueia tudo o resto)
+## Fase 0 — Estabilizar a base (bloqueia tudo o resto) ✅ CONCLUÍDA
 
-- [ ] Confirmar causa do `NFC Fail` no StickS3: rodar com o log
-      `M5.getBoard()` (já adicionado nesta branch) e comparar contra o board
-      ID esperado para M5StickS3.
-- [ ] Se for detecção de board: corrigir ou reportar upstream no M5Unified.
-- [ ] Se for timing: expor `kNfcBootPowerSettleMs` / `kNfcBootRetryCount`
-      como valores fáceis de tunar por board (hoje já são `constexpr` por
-      `#if defined(...)`, só falta testar valores maiores no StickS3).
-- [ ] Adicionar fallback de pinos SDA/SCL trocados no StickS3, igual ao que
-      já existe pro CardPuter (`main.cpp`, dentro de `initNfcAtBoot()`).
-- [x] Travar `M5Unified` em versão exata (não `^`) no ambiente StickS3,
-      pra não sofrer de novo com "funcionava semana passada".
-- [ ] Avaliar pinar `M5UnitNFC` também (hoje sem tag/commit fixo em quase
-      todos os ambientes) — cuidado especial com `m5stack-m5paper`, que
-      depende do `patch_m5unit_nfc.py` bater contra strings literais do
-      código-fonte da lib.
+**Fechada e validada com hardware real em 18/07.** Causa raiz do `NFC Fail`
+não era nada disso que a gente suspeitava de início — era o módulo Grove
+errado (`WS1850S` em vez de `Unit NFC`/ST25R3916). Ver Fase 1.5 pra
+detalhes. Com o `Unit NFC` correto conectado: `[BOOT] DIAG: PASS`, boot
+limpo, e leitura real confirmada (`MFC 1K`, UID `AD2A19D4`).
+
+- [x] Confirmar causa do `NFC Fail` no StickS3: log `M5.getBoard()` = `26`
+      (correto). Board detection nunca foi o problema.
+- [x] ~~Se for detecção de board~~ — descartado, board sempre detectou certo.
+- [x] ~~Se for timing~~ — descartado. Testado com 220ms→1.5s e 5→10 retries,
+      resultado idêntico. Timing nunca foi o problema.
+- [x] ~~Fallback de pinos SDA/SCL trocados~~ — descartado, pinos GPIO9/10
+      sempre estavam corretos (confirmado por scan I2C real).
+- [x] Travar `M5Unified` em versão exata (`0.2.18`, StickS3), sem afetar
+      `m5paper`.
+- [x] Pinar `M5UnitNFC` em `#0.1.0` nos ambientes sem `patch_m5unit_nfc.py`
+      (mantido flutuante só no `m5paper`, de propósito).
 
 ## Fase 1 — Usabilidade da UI (botão único)
 
