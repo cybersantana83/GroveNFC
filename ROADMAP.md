@@ -104,29 +104,42 @@ não reconhece o endereço.
       (nome comercial, chip, endereço I2C, protocolos suportados), já
       que hoje nada no repo avisa que "GroveNFC" mira um chip específico.
 
-## Fase 2 — Arquitetura de módulos (onde entram os projetos pessoais)
+## Fase 2 — Leitores + usabilidade (escopo redefinido em 06/08)
 
-Ideia: manter a separação de camadas que o repo original já tem
-(hardware GroveNFC vs firmware/UI) e adicionar uma **camada de
-capacidades** plugável por cima:
+**Mudança de escopo**: EMV manipulation, Relay/MITM e o rig de PN532Killer
+saem do plano — decidido não seguir por esse caminho no fork. Foco vira
+**leitura/diagnóstico read-only** (EMV, FIDO2) + deixar a UI de verdade
+usável, em vez de ferramentas de manipulação/relay.
 
-- [ ] **Módulo EMV manipulation** — portar a lógica de manipulação de tags
-      TTQ (`9F66`), CTQ (`9F6C`), AIP (`82`) que hoje vive nos scripts do
-      rig de Raspberry Pi Zero.
-- [ ] **Módulo Relay/MITM** — avaliar usar `ESP-PN532Killer` /
-      `ESP-PN532 UART` (mesmo autor, `whywilson`) como transporte
-      alternativo ao ST25R3916 nativo do Grove, pra reaproveitar lógica já
-      testada em vez de portar do zero.
-- [ ] **Módulo Dump manager** — unificar formato de dump entre o que já
-      existe no firmware (`/dumps`, Web File Manager) e o que você usa
-      hoje nos scripts.
+Arquitetura: manter a separação de camadas do repo original (hardware
+GroveNFC/WS1850S vs firmware/UI) e adicionar uma **camada de leitores**
+plugável por cima — mesmo padrão que já usamos pro roteamento
+ST25R3916/WS1850S (`readCardGeneric()`), só que por protocolo de
+aplicação em vez de por chip.
+
+- [ ] **Leitor EMV (read-only)** — detectar cartão EMV via ISO14443A/B,
+      selecionar AID (PSE/PPSE), e extrair/exibir campos de diagnóstico:
+      AID, application label, TTQ (`9F66`), CTQ (`9F6C`), AIP (`82`).
+      Sem escrita, sem manipulação de tag — só leitura e exibição na tela,
+      no mesmo espírito do que já existe no Reader hoje, mas indo um nível
+      mais fundo que "protocolo + UID".
+- [ ] **Leitor FIDO2 NFC (read-only)** — ler resposta de authenticators
+      FIDO2/CTAP2 via NFC (comandos APDU de autenticação/get-info) e
+      mostrar dados estruturados na tela. **Importante**: isso é uma
+      ferramenta nova, separada do `fido2-nfc-scanner` (Flipper FAP) e da
+      pesquisa Chaos IAM — não misturar branding/metadados entre os dois
+      projetos.
+- [ ] **Usabilidade da UI** (itens que já estavam na Fase 1, consolidados
+      aqui por fazerem parte do mesmo esforço de "deixar usável de
+      verdade" antes de adicionar mais leitores):
+      - Feedback visual durante o hold do botão (barra de progresso).
+      - Não descartar cliques na janela de animação de transição (~240ms).
+      - Documentar no README o mapeamento real de botões por board.
 
 ## Fase 3 — Migração gradual
 
-- [ ] Ir descontinuando `.fap`/scripts conforme cada módulo atinge
-      paridade de funcionalidade no firmware unificado.
 - [ ] Ao final, um único firmware cobrindo AtomS3 / StickS3 / CardPuter
-      com todas as capacidades hoje espalhadas.
+      com leitura EMV, FIDO2, e os dois chips NFC/RFID suportados.
 
 ## Notas técnicas soltas (pra não esquecer)
 
