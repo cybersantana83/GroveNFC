@@ -60,12 +60,37 @@ não reconhece o endereço.
       `NFC FAIL` genérico, sem sobrescrever o notice no `runBootDebugFlow()`,
       e sem I2C error spam nas leituras de hw/fw version quando `nfc_ready`
       é `false`. Commits: ver histórico da branch `santana/fork-base`.
-- [ ] **Driver WS1850S**: o WS1850S é compatível a nível de comando com a
-      família MFRC522 — dá pra reaproveitar uma lib tipo `MFRC522_I2C`
-      em vez de escrever do zero. Cobre ISO14443A/MIFARE/NTAG.
-      Bloqueado até o módulo "Unit NFC" (ST25R3916) chegar (~06/08) —
-      preciso dos dois lado a lado pra não quebrar o caminho ST25R3916
-      já funcional enquanto adiciono o WS1850S.
+- [x] **Driver WS1850S**: implementado com `arozcan/MFRC522-I2C-Library`
+      (o WS1850S é compatível a nível de comando com a família MFRC522).
+      Validado com hardware real: MIFARE Classic 1K (UID 4 bytes) e
+      NTAG/Ultralight (UID 7 bytes, aparece como `MFUL` — a lib não
+      distingue NTAG213/215/216 entre si via SAK, todas caem no mesmo
+      `PICC_TYPE_MIFARE_UL`). Cobre Reader apenas — sem FeliCa, ISO15693,
+      emulação (ver item de aviso de limitação abaixo).
+
+      **Arquitetura**: `readWs1850sCard()` preenche um `CardInfo` no mesmo
+      formato que o resto do firmware já usa; `readCardGeneric()` roteia
+      pro backend certo (`nfc_ws1850s_active` ou o `nfc`/ST25R3916 padrão)
+      sem a UI precisar saber qual chip está por trás.
+
+      **Pegadinhas encontradas** (documentando pra não cair de novo):
+      - A lógica real de polling do Reader não vive em `handleReader()`
+        (essa função existe mas nunca é chamada) — está **duplicada e
+        embutida** dentro do `nfcWorkerTask` (Core 0), no bloco comentado
+        `// --- handleReader (periodic card poll) ---`. Qualquer mudança
+        de leitura precisa ir lá, não na função de mesmo nome.
+      - `PICC_IsNewCardPresent()` usa REQA internamente, que **não acorda
+        cartões em HALT**. Como halitamos o cartão após cada leitura
+        (`PICC_HaltA()`), isso fazia o cartão "sumir da tela" após uma
+        leitura — resolvido trocando a checagem de presença por
+        `PICC_WakeupA()` (WUPA acorda cartões em HALT e em IDLE).
+      - `card.protocol` precisa usar os códigos curtos que o resto do
+        firmware já espera (`MFC1K`, `MFC4K`, `MFUL`, etc. — ver
+        `protocolFull()`), não a string descritiva que a lib MFRC522
+        retorna (`PICC_GetTypeName()`) — senão a UI mostra "Unknown".
+      - O construtor `MFRC522(addr, resetPin)` exige um GPIO válido pro
+        pino de reset mesmo sem conexão física real (o Grove do WS1850S
+        não expõe esse pino) — usamos um pino dummy não conectado (`4`).
 - [ ] **Aviso de limitação na UI e no README**, específico por chip
       detectado:
       - `WS1850S`: ISO14443A, MIFARE, NTAG. **Sem** FeliCa, ISO15693, e

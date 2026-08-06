@@ -10,6 +10,9 @@
 #endif
 #include <Preferences.h>
 #include <Wire.h>
+#if defined(APP_TARGET_STICKS3)
+#include <MFRC522_I2C.h>  // [FORK] WS1850S secondary driver, Fase 1.5
+#endif
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -185,6 +188,13 @@ constexpr uint16_t kPianoSustainRetriggerMs = 110;
 constexpr const char* kPianoPrefNs = "piano";
 
 GroveNFC nfc(Wire);
+bool nfc_ws1850s_active = false;  // [FORK] declared for all boards; only set true on StickS3
+#if defined(APP_TARGET_STICKS3)
+// [FORK] WS1850S secondary driver (Fase 1.5). Dummy reset pin 4: the WS1850S
+// Grove connector has no physical reset line, but the lib requires a real
+// GPIO number to call pinMode()/digitalWrite() on.
+MFRC522 mfrc522_ws1850s(0x28, 4);
+#endif
 int active_sda_pin = kSdaPin;
 int active_scl_pin = kSclPin;
 // Off-screen canvas for flicker-free rendering (all drawing targets this sprite, then a
@@ -7295,8 +7305,63 @@ void maintainNfcConnection() {
   }
 }
 
+#if defined(APP_TARGET_STICKS3)
+// [FORK] WS1850S secondary driver (Fase 1.5). Fills a CardInfo the same
+// shape the rest of the firmware already expects, so callers don't need
+// to know which chip is actually active.
+bool readWs1850sCard(CardInfo& card) {
+  // [FORK] PICC_IsNewCardPresent() uses REQA internally, which does NOT
+  // wake cards left in HALT state (we halt after every successful read
+  // below). Use WUPA instead so a card held in place keeps being detected
+  // on every poll instead of appearing to "disappear" after one read.
+  byte bufferATQA[2];
+  byte bufferSize = sizeof(bufferATQA);
+  byte wakeupStatus = mfrc522_ws1850s.PICC_WakeupA(bufferATQA, &bufferSize);
+  if (wakeupStatus != MFRC522::STATUS_OK && wakeupStatus != MFRC522::STATUS_COLLISION) {
+    return false;
+  }
+  if (!mfrc522_ws1850s.PICC_ReadCardSerial()) {
+    return false;
+  }
+  String uid;
+  for (byte i = 0; i < mfrc522_ws1850s.uid.size; i++) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02X", mfrc522_ws1850s.uid.uidByte[i]);
+    uid += buf;
+  }
+  byte piccType = mfrc522_ws1850s.PICC_GetType(mfrc522_ws1850s.uid.sak);
+  // [FORK] Map to the same short protocol codes the ST25R3916 backend
+  // already uses (protocolFull() and other UI code expect these exact
+  // strings) instead of the lib's own descriptive name.
+  switch (piccType) {
+    case MFRC522::PICC_TYPE_MIFARE_MINI: card.protocol = "MFCMini"; break;
+    case MFRC522::PICC_TYPE_MIFARE_1K:   card.protocol = "MFC1K";   break;
+    case MFRC522::PICC_TYPE_MIFARE_4K:   card.protocol = "MFC4K";   break;
+    case MFRC522::PICC_TYPE_MIFARE_UL:   card.protocol = "MFUL";    break;
+    default:                             card.protocol = "ISO14443A"; break;
+  }
+  card.uid = uid;
+  card.valid = true;
+  card.detail = "WS1850S";
+  mfrc522_ws1850s.PICC_HaltA();
+  return true;
+}
+#endif
+
+// [FORK] Routes card reads to whichever backend is active (ST25R3916 via
+// GroveNFC, or WS1850S via the secondary MFRC522 driver). UI code calls
+// this and doesn't need to know which chip is behind it.
+bool readCardGeneric(CardInfo& card) {
+#if defined(APP_TARGET_STICKS3)
+  if (nfc_ws1850s_active) {
+    return readWs1850sCard(card);
+  }
+#endif
+  return nfc.readAny(card);
+}
+
 void handleReader() {
-  if (!nfc_ready) return;
+  if (!nfc_ready && !nfc_ws1850s_active) return;
   const uint32_t now = millis();
   uint32_t poll_interval = last_card.valid ? kReaderHoldCheckMs : kPollIntervalMs;
   if (!last_card.valid && !in_home && menu_page == MenuPage::Reader && poll_interval < 220) {
@@ -7307,7 +7372,11 @@ void handleReader() {
   last_poll_ms = now;
 
   CardInfo card;
-  const bool got_card = reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card);
+  // [FORK] WS1850S doesn't support ISO14443B, so reader_14b_only is ignored
+  // when it's the active backend - readCardGeneric() routes to the right driver.
+  const bool got_card = (nfc_ws1850s_active)
+      ? readCardGeneric(card)
+      : (reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card));
   if (got_card) {
     reader_fail_streak = 0;
     last_reader_success_ms = now;
@@ -7625,13 +7694,19 @@ void nfcWorkerTask(void* /*param*/) {
     }
 
     // --- handleReader (periodic card poll) ---
-    if (nfc_ready && !w_in_home && nfc_w_is_reader_page) {
+    // [FORK] Also poll when the WS1850S secondary driver is active (nfc_ready
+    // stays false for that backend on purpose - see detection block).
+    if ((nfc_ready || nfc_ws1850s_active) && !w_in_home && nfc_w_is_reader_page) {
       const uint32_t poll_iv = nfc_w_card_valid ? kReaderHoldCheckMs : kPollIntervalMs;
       if (now - w_last_poll_ms >= poll_iv) {
         w_last_poll_ms = now;
         if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
           CardInfo card;
-          const bool got = nfc_w_reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card);
+          // [FORK] WS1850S has no ISO14443B support, so nfc_w_reader_14b_only
+          // is ignored for that backend - readCardGeneric() routes correctly.
+          const bool got = nfc_ws1850s_active
+              ? readCardGeneric(card)
+              : (nfc_w_reader_14b_only ? nfc.readOnlyISO14B(card) : nfc.readAny(card));
           NfcReaderResult rr;
           rr.card = card;
           rr.got_card = got;
@@ -8103,18 +8178,27 @@ void setup() {
   if (found_ws1850s && !found_st25r3916) {
     nfc_ready = false;
     nfc_chip_unsupported = true;
+#if defined(APP_TARGET_STICKS3)
+    mfrc522_ws1850s.PCD_Init();
+    nfc_ws1850s_active = true;
+    boot_notice_line = "WS1850S: leitura MIFARE ativa";
+    Serial.println("[BOOT] WS1850S detected - secondary driver initialized (Reader only)");
+#else
     boot_notice_line = "WS1850S: chip nao suportado";
     Serial.println("[BOOT] WS1850S detected - unsupported chip, skipping NFC init");
+#endif
   } else {
     nfc_ready = initNfcAtBoot();
   }
-  nfc_module_name = nfc_ready ? String(nfc.deviceName()) : String("GroveNFC");
+  nfc_module_name = nfc_ready ? String(nfc.deviceName())
+                  : nfc_ws1850s_active ? String("WS1850S (RFID Unit 2)")
+                  : String("GroveNFC");
   if (nfc_ready) {
     hw_ver = nfc.hardwareVersion();
     fw_ver = nfc.firmwareVersion();
   }
   last_card.protocol = "None";
-  last_card.detail = nfc_ready ? "Waiting card..." : "No NFC module";
+  last_card.detail = (nfc_ready || nfc_ws1850s_active) ? "Waiting card..." : "No NFC module";
   diagnose_report = "Press hold to run check";
   last_reader_success_ms = millis();
 
