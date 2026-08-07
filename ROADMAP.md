@@ -117,18 +117,66 @@ plugável por cima — mesmo padrão que já usamos pro roteamento
 ST25R3916/WS1850S (`readCardGeneric()`), só que por protocolo de
 aplicação em vez de por chip.
 
-- [ ] **Leitor EMV (read-only)** — detectar cartão EMV via ISO14443A/B,
-      selecionar AID (PSE/PPSE), e extrair/exibir campos de diagnóstico:
-      AID, application label, TTQ (`9F66`), CTQ (`9F6C`), AIP (`82`).
-      Sem escrita, sem manipulação de tag — só leitura e exibição na tela,
-      no mesmo espírito do que já existe no Reader hoje, mas indo um nível
-      mais fundo que "protocolo + UID".
+- [x] **Leitor EMV (read-only) — PAN + bandeira**: validado ponta a ponta
+      em `src/emv_test.cpp` (ambiente `emv-test`, isolado do firmware
+      principal, mesmo padrão do `ws1850s_test.cpp`). Fluxo completo:
+      `RATS` → `SELECT PPSE` → lista aplicações (AID/label/prioridade) →
+      escolhe crédito por label (fallback: menor prioridade) → `SELECT AID`
+      → `GPO` com PDOL neutro (valor zero, sem CVM/online) → extrai PAN do
+      Track2 (tag `57`). Testado com cartão real (Visa Crédito + Electron),
+      saída automática: `Bandeira: Visa` / `Numero do cartao: ...`.
+
+      **Por que foi bem mais trabalhoso que o Reader normal**: cartões EMV
+      usam ISO14443-4 (camada 4, com APDUs), que a `MFRC522-I2C-Library`
+      não implementa nativamente (só camada 3, tipo MIFARE). Construímos
+      isso na mão em cima do `PCD_TransceiveData()` cru. Pegadinhas
+      encontradas, na ordem que apareceram:
+
+      1. **CRC não é anexado automaticamente** — `checkCRC=true` só
+         *valida* o CRC da resposta, não *envia* CRC no comando. RATS e
+         todo I-block precisam de CRC_A calculado manualmente
+         (`PCD_CalculateCRC()`) e anexado antes de transmitir.
+      2. **Timeout de hardware fixo em 25ms** (`PCD_Init()` configura
+         `TReloadReg` pra isso) — cartões EMV frequentemente declaram
+         `FWI` no ATS pedindo 40-80ms+. Precisa reconfigurar
+         `TReloadRegH/L` antes de qualquer troca de APDU.
+      3. **S(WTX) — "me dá mais tempo"**: além do FWT do ATS, o cartão
+         pode pedir extensões de tempo em tempo real via bloco S(WTX)
+         (`PCB=0xF2/0xF3`). Preciso ecoar `PCB+WTXM` de volta e esperar
+         de novo — GPO chegou a pedir 8+ rounds disso (é processamento
+         criptográfico de verdade, bem mais lento que SELECT). Um limite
+         de segurança baixo (20 rounds) já causou falso-negativo — subiu
+         pra 100.
+      4. **N(R) do R(ACK) é o INVERSO do bloco recebido**
+         (`i_bn(pcb) ^ 0x01`, confirmado contra a implementação madura
+         `M5Unit-NFC/isoDEP.cpp`), não o mesmo valor — usar o mesmo fez o
+         cartão reenviar o mesmo bloco pra sempre em vez de avançar.
+      5. **CRC não é removido de cada pedaço encadeado** — ao concatenar
+         blocos de uma resposta fragmentada (chaining), cada pedaço ainda
+         carrega seu próprio CRC de 2 bytes no final; sem descontar isso
+         (`backLen - 3`, não `backLen - 1`), o CRC de cada pedaço vaza pro
+         meio dos dados remontados (sintoma visível: strings cortadas ao
+         meio, ex. "VISA DEBITO" virando "VISA D" + lixo + "EBITO").
+      6. **Buffer de 256 bytes com variável `byte` estoura silenciosamente**
+         (`byte len = sizeof(buf256)` vira `0`, já que `256 mod 256 = 0`) —
+         causou `STATUS_NO_ROOM` mesmo com espaço de sobra. FIFO físico do
+         chip é só 64 bytes mesmo, então não tem por que passar disso pra
+         os buffers de troca por vez (só o buffer de *acumulação* da
+         resposta remontada precisa ser maior, tipado com cuidado).
+
+      **Reaproveitável pro FIDO2**: o `sendIBlock()` (com WTX + chaining +
+      todas as correções acima) é genérico — qualquer troca de APDU sobre
+      ISO14443-4 usa a mesma base, incluindo FIDO2/CTAP2.
 - [ ] **Leitor FIDO2 NFC (read-only)** — ler resposta de authenticators
       FIDO2/CTAP2 via NFC (comandos APDU de autenticação/get-info) e
       mostrar dados estruturados na tela. **Importante**: isso é uma
       ferramenta nova, separada do `fido2-nfc-scanner` (Flipper FAP) e da
       pesquisa Chaos IAM — não misturar branding/metadados entre os dois
       projetos.
+- [ ] **Integrar o leitor EMV no firmware principal** — hoje só existe em
+      `src/emv_test.cpp` (ambiente isolado `emv-test`). Falta portar pra
+      uma tela nova no `main.cpp` (mesmo padrão do `readCardGeneric()`),
+      com número completo na tela (decisão explícita: sem máscara).
 - [ ] **Usabilidade da UI** (itens que já estavam na Fase 1, consolidados
       aqui por fazerem parte do mesmo esforço de "deixar usável de
       verdade" antes de adicionar mais leitores):
