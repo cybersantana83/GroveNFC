@@ -149,6 +149,25 @@ aplicação em vez de por chip.
       Track2 (tag `57`). Testado com cartão real (Visa Crédito + Electron),
       saída automática: `Bandeira: Visa` / `Numero do cartao: ...`.
 
+      **Dossiê (igual ao `cards_db` do ChaosID, adaptado pra EMV)** —
+      `src/emv_db.h`/`.cpp`: em vez de só imprimir o PAN, o `tryGPO()`
+      também extrai o AIP (Application Interchange Profile, tag `82` — no
+      Format 2 via TLV junto do Track2; no Format 1 são os 2 bytes logo
+      após tag+length, sem TLV) e usa o bit de autenticação de dados
+      offline que o **cartão de verdade declarou** (`CDA` > `DDA` > `SDA`
+      > nenhum, prioridade conforme EMV Book 3) pra escolher um perfil de
+      referência: método de autenticação, criptografia, vetor de ataque
+      público conhecido, ano, nível de risco e notas. Diferente do
+      `cards_db` do ChaosID (que mapeia *nome de protocolo* → perfil
+      estático), aqui a chave é um dado lido na hora do cartão (AIP), não
+      só a bandeira — então o dossiê reflete o que aquele cartão
+      específico declarou, não um chute genérico por bandeira. Perfis
+      documentados: SDA (replay de assinatura estática, conhecido desde
+      os anos 2000), DDA (vulnerável ao MITM de Murdoch et al., "Chip and
+      PIN is Broken", IEEE S&P 2010), CDA (fecha essa lacuna, sem ataque
+      público conhecido), e "nenhum" (cartão sem autenticação offline —
+      não necessariamente frágil, só fora do que esse dossiê classifica).
+
       **Por que foi bem mais trabalhoso que o Reader normal**: cartões EMV
       usam ISO14443-4 (camada 4, com APDUs), que a `MFRC522-I2C-Library`
       não implementa nativamente (só camada 3, tipo MIFARE). Construímos

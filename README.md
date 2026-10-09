@@ -12,7 +12,7 @@ Fork de [whywilson/GroveNFC](https://github.com/whywilson/GroveNFC). Parte do la
 **Fase 0, 1.5 e leitor EMV concluídos** — leitura real validada em hardware nos dois chips, leitor EMV extraindo PAN + bandeira de cartão real.
 
 - **Detecção automática de chip** — scan de I2C no boot identifica `ST25R3916` (`0x48`, produto "Unit NFC" — FeliCa/ISO15693/emulação completa) ou `WS1850S` (`0x28`, produto "RFID Unit 2" — ISO14443A/MIFARE/NTAG, sem emulação), e roteia pro driver certo sem o usuário precisar configurar nada. Antes disso, conectar o módulo "errado" dava um `NFC Fail` genérico sem nenhuma pista do motivo.
-- **Leitor EMV (read-only)** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2. Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). Hoje validado em `src/emv_test.cpp` (ambiente isolado); portar pra uma tela no firmware principal é o próximo passo.
+- **Leitor EMV (read-only)** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2 e o AIP (tag `82`). Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). O resultado é um **dossiê** (bandeira, PAN, AID, AIP e o perfil de autenticação que o AIP indica — SDA/DDA/CDA, com vetor de ataque público conhecido, ano e risco — ver `src/emv_db.h`/`.cpp`), no mesmo espírito do `cards_db` do [ChaosID](https://github.com/cybersantana83/ChaosID). Hoje validado em `src/emv_test.cpp` (ambiente isolado); portar pra uma tela no firmware principal é o próximo passo.
 - **Leitor FIDO2 NFC (planejado)** — vai reaproveitar a mesma base ISO14443-4 do leitor EMV (`sendIBlock()`, com WTX e chaining já resolvidos). Ferramenta separada da pesquisa **Chaos IAM**, sem compartilhar branding/metadados com ela.
 - **Usabilidade da UI** — corrigido: cliques perdidos durante a animação de transição da home (~240ms) e falta de feedback visual durante o hold do botão (agora tem uma barra de progresso). Falta documentar o mapeamento de botões por board.
 
@@ -56,6 +56,7 @@ GroveNFC/
     ├── M5Paper_Config.h           config específica do target M5Paper
     ├── ws1850s_test.cpp          sketch isolado de validação do driver WS1850S
     ├── emv_test.cpp              sketch isolado de validação do leitor EMV
+    ├── emv_db.h / emv_db.cpp     dossiê EMV: perfil SDA/DDA/CDA a partir do AIP lido
     └── test_m5paper.cpp         teste de canvas→sprite→push pro e-ink do M5Paper
 ```
 

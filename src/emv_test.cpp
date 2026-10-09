@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // [FORK] Standalone validation sketch for EMV reading (Fase 2).
-// Goal: confirm ISO14443-4 (RATS) + SELECT PPSE works at all, before
-// building the real TLV parser for Track2 (tag 57) / PAN (tag 5A).
+// Full flow validated end-to-end: RATS -> SELECT PPSE -> SELECT AID -> GPO
+// -> Track2 (PAN) + AIP, printed as a dossier (brand, PAN, AID, AIP, and
+// the reference auth-method/attack/year/risk profile from emv_db.cpp) in
+// the same spirit as ChaosID's cards_db-driven result screen.
 //
 // Build/flash with:
 //   pio run -e emv-test -t upload -t monitor
@@ -9,12 +11,20 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <MFRC522_I2C.h>
+#include "emv_db.h"
 
 constexpr int kSdaPin = 9;
 constexpr int kSclPin = 10;
 constexpr uint8_t kWs1850sAddr = 0x28;
 
 MFRC522 mfrc522(kWs1850sAddr, 4);  // dummy reset pin, same as ws1850s_test.cpp
+
+// [FORK] Set by parsePPSEResponse() once an application is chosen, read
+// later by printEmvDossier() - simplest way to carry brand/AID across to
+// the GPO step without threading extra params through trySelectAID().
+String g_emv_brand = "Unknown";
+byte g_emv_aid[16];
+byte g_emv_aid_len = 0;
 
 // [FORK] PCD_Init() configures a fixed 25ms hardware timeout (TReloadReg),
 // tuned for simple MIFARE reads. EMV cards often declare FWI >= 7-8 in
@@ -298,10 +308,13 @@ void parsePPSEResponse(byte* resp, byte respLen) {
   }
 
   Serial.printf("[EMV] >>> Bandeira: %s\n", candidates[chosen].brand.c_str());
+  g_emv_brand = candidates[chosen].brand;
+  g_emv_aid_len = candidates[chosen].aidLen;
+  memcpy(g_emv_aid, candidates[chosen].aid, g_emv_aid_len);
   trySelectAID(candidates[chosen].aid, candidates[chosen].aidLen);
 }
 
-void parseTrack2(byte* track2, byte track2Len) {
+String parseTrack2(byte* track2, byte track2Len) {
   String pan = "";
   bool foundSeparator = false;
   for (byte i = 0; i < track2Len && !foundSeparator; i++) {
@@ -314,6 +327,39 @@ void parseTrack2(byte* track2, byte track2Len) {
     }
   }
   Serial.printf("[EMV] >>> Numero do cartao: %s\n", pan.c_str());
+  return pan;
+}
+
+// [FORK] This is the GroveNFC-fork equivalent of ChaosID's cards_db dossier
+// display (scenes/chaos_id_scene_result.c): instead of just printing the
+// PAN, show a block with what we actually read off the card (brand, AID,
+// AIP) plus the reference profile that AIP maps to (auth method, known
+// public attack, year, risk) - see emv_db.cpp for the data and citations.
+void printEmvDossier(uint8_t aipByte1, bool aipFound, const String& pan) {
+  const EmvAuthProfile* p = emvProfileForAip(aipFound ? aipByte1 : 0x00);
+
+  Serial.println();
+  Serial.println("========== [EMV] DOSSIE ==========");
+  Serial.printf("  Bandeira:         %s\n", g_emv_brand.c_str());
+  if (pan.length() > 0) {
+    Serial.printf("  Numero do cartao: %s\n", pan.c_str());
+  } else {
+    Serial.println("  Numero do cartao: (nao disponivel nesta leitura)");
+  }
+  printHex("  AID", g_emv_aid, g_emv_aid_len);
+  if (aipFound) {
+    Serial.printf("  AIP (raw):        0x%02X\n", aipByte1);
+  } else {
+    Serial.println("  AIP (raw):        nao encontrado nesta resposta");
+  }
+  Serial.printf("  Autenticacao:     %s\n", p->auth_method);
+  Serial.printf("  Criptografia:     %s\n", p->crypto);
+  Serial.printf("  Vetor de ataque:  %s\n", p->attack_vector);
+  Serial.printf("  Ano:              %s\n", p->year);
+  Serial.printf("  Risco:            %s\n", emvRiskLabel(p->risk));
+  Serial.printf("  Notas:            %s\n", p->notes);
+  Serial.println("===================================");
+  Serial.println();
 }
 
 void tryGPO() {
@@ -357,15 +403,35 @@ void tryGPO() {
   if (resp[0] == 0x77) {
     TlvEntry fields[10];
     byte nf = parseTlvLevel(resp + 2, gpoDataLen - 2, fields, 10);
+
+    byte* track2Val = nullptr; byte track2Len = 0;
+    byte aipByte1 = 0x00;
+    bool aipFound = false;
     for (byte i = 0; i < nf; i++) {
       if (fields[i].tag == 0x57) {
-        parseTrack2(fields[i].value, fields[i].len);
-        return;
+        track2Val = fields[i].value;
+        track2Len = fields[i].len;
+      } else if (fields[i].tag == 0x82 && fields[i].len >= 1) {
+        aipByte1 = fields[i].value[0];
+        aipFound = true;
       }
     }
-    Serial.println("[EMV] Track2 (tag 57) not found in GPO response");
+
+    String pan = "";
+    if (track2Val) {
+      pan = parseTrack2(track2Val, track2Len);
+    } else {
+      Serial.println("[EMV] Track2 (tag 57) not found in GPO response");
+    }
+    printEmvDossier(aipByte1, aipFound, pan);
   } else if (resp[0] == 0x80) {
+    // [FORK] Format 1 is NOT BER-TLV: value = AIP (2 bytes) || AFL. So the
+    // AIP is simply resp[2]/resp[3] (after tag=resp[0], len=resp[1]) - no
+    // TLV walk needed, unlike Format 2.
     Serial.println("[EMV] GPO returned Format 1 (AIP+AFL only) - Track2 needs READ RECORD, not implemented yet");
+    bool aipFound = gpoDataLen >= 3;  // tag(1) + len(1) + at least 1 AIP byte
+    byte aipByte1 = aipFound ? resp[2] : 0x00;
+    printEmvDossier(aipByte1, aipFound, "");
   }
 }
 
