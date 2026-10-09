@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# [FORK] Basic CI: compile every PlatformIO environment on push/PR.
+# This only validates that the firmware builds (toolchain + linking) for
+# each board target — it does not flash or test real hardware (none of
+# that is available in a GitHub-hosted runner). Catches the class of bug
+# that bit us before pushing (duplicate setup()/loop() from a test sketch
+# leaking into a board env's build_src_filter, dependency breakage, etc.).
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - m5stack-atoms3
+          - m5stack-sticks3
+          - m5stack-stickcplus
+          - m5stack-cardputer
+          - m5stack-m5paper
+          - m5stack-m5paper-test
+          - ws1850s-test
+          - emv-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}

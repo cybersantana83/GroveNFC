@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "GroveNFC.h"
 
 #if __has_include(<M5UnitUnified.h>) && __has_include(<M5UnitUnifiedNFC.h>)

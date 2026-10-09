@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // [FORK] Standalone validation sketch for EMV reading (Fase 2).
 // Goal: confirm ISO14443-4 (RATS) + SELECT PPSE works at all, before
 // building the real TLV parser for Track2 (tag 57) / PAN (tag 5A).

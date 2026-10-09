@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Mini test: canvas→sprite→push→display() flow verification
 // Compile: pio run -e m5stack-m5paper-test -t upload --upload-port ...
 #ifdef APP_TARGET_M5PAPER_TEST

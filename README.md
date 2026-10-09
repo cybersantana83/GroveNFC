@@ -1,174 +1,109 @@
-# GroveNFC Reference Demo (AtomS3 + M5Stick + CardPuter + M5Paper)
+# GroveNFC
 
-Reference firmware demo for **Grove NFC module** on **AtomS3 / M5StickS3 / M5StickC Plus (1.1/2 unified firmware) / CardPuter / CardPuter ADV (single firmware logic) / M5Paper**.
+![Build](https://github.com/cybersantana83/GroveNFC/actions/workflows/build.yml/badge.svg)
+![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)
 
-This project demonstrates one implementation path. GroveNFC capability can be adapted to other hardware platforms in the future via **I2C/UART communication paths**.
+Firmware de referência pra módulo NFC Grove (M5Stack: AtomS3 / M5StickS3 / M5StickC Plus / CardPuter / M5Paper). Detecta automaticamente qual dos dois chips NFC/RFID da M5 está conectado (`ST25R3916` ou `WS1850S`), lê cartões/tags, e inclui um leitor EMV read-only (PAN + bandeira) validado ponta a ponta sobre ISO14443-4.
 
-## Capability Boundary
+Fork de [whywilson/GroveNFC](https://github.com/whywilson/GroveNFC). Parte do laboratório de hardware da **Café com Solda**.
 
-### GroveNFC hardware/module layer
+## Status
 
-- Card-size hardware form factor
-- NFC communication interface (platform integration via I2C/UART)
-- Multi-protocol card/tag interaction:
-  - ISO14443A
-  - ISO14443B
-  - ISO15693
-  - FeliCa
-- Tag emulation data path used by demo modes:
-  - MIFARE 1K
-  - NTAG213 / NTAG215 / NTAG216
-  - ISO14443B (China II)
-  - ISO15693
-- Low-level diagnostic operations:
-  - device communication check
-  - HW/FW version readback
-  - mode register R/W check
-  - RF on/off control check
+**Fase 0, 1.5 e leitor EMV concluídos** — leitura real validada em hardware nos dois chips, leitor EMV extraindo PAN + bandeira de cartão real.
 
-### Reference firmware layer (this repo)
+- **Detecção automática de chip** — scan de I2C no boot identifica `ST25R3916` (`0x48`, produto "Unit NFC" — FeliCa/ISO15693/emulação completa) ou `WS1850S` (`0x28`, produto "RFID Unit 2" — ISO14443A/MIFARE/NTAG, sem emulação), e roteia pro driver certo sem o usuário precisar configurar nada. Antes disso, conectar o módulo "errado" dava um `NFC Fail` genérico sem nenhuma pista do motivo.
+- **Leitor EMV (read-only)** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2. Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). Hoje validado em `src/emv_test.cpp` (ambiente isolado); portar pra uma tela no firmware principal é o próximo passo.
+- **Leitor FIDO2 NFC (planejado)** — vai reaproveitar a mesma base ISO14443-4 do leitor EMV (`sendIBlock()`, com WTX e chaining já resolvidos). Ferramenta separada da pesquisa **Chaos IAM**, sem compartilhar branding/metadados com ela.
+- **Usabilidade da UI** — corrigido: cliques perdidos durante a animação de transição da home (~240ms) e falta de feedback visual durante o hold do botão (agora tem uma barra de progresso). Falta documentar o mapeamento de botões por board.
 
-- AtomS3 / M5StickS3 UI and single-button interaction flow
-- Reader / NDEF / Emulator / Diagnose pages
-- Serial logging, heartbeat, and boot debug flow
-- NDEF read and text parsing for demo usage
-- Optional app-level behaviors (for example, network onboarding) implemented by firmware, not by GroveNFC hardware itself
+Detalhes técnicos completos — pegadinhas de protocolo, decisões de escopo, histórico de cada fase — estão no [`ROADMAP.md`](ROADMAP.md).
 
 ## Hardware
 
-Current board I2C pins (auto-selected in `src/main.cpp` by build target):
+Dois chips NFC/RFID da M5 são suportados, detectados automaticamente no boot:
+
+| Produto M5 | Chip | Endereço I2C | Protocolos | Emulação |
+|---|---|---|---|---|
+| Unit NFC | `ST25R3916` | `0x48` | ISO14443A, ISO14443B, ISO15693, FeliCa | Sim (MIFARE 1K, NTAG213/215/216, ISO15693) |
+| RFID Unit 2 | `WS1850S` | `0x28` | ISO14443A (MIFARE, NTAG/Ultralight) | Não |
+
+Pinos I2C por board (selecionados automaticamente em `src/main.cpp` pelo target de build):
 
 - AtomS3: SDA `GPIO2`, SCL `GPIO1`
 - M5StickS3: SDA `GPIO9`, SCL `GPIO10`
-- M5StickC Plus (1.1 / Plus2 unified): SDA `GPIO32`, SCL `GPIO33`
+- M5StickC Plus (1.1 / Plus2): SDA `GPIO32`, SCL `GPIO33`
 - CardPuter / CardPuter ADV: SDA `GPIO2`, SCL `GPIO1`
-- M5Paper Port A: SDA `GPIO25`, SCL `GPIO32`
-- I2C address: `0x48`
+- M5Paper (Porta A): SDA `GPIO25`, SCL `GPIO32`
 
-Pin mapping note:
+Notas:
 
-- AtomS3 Grove `G1/G2` corresponds to StickC Grove `G33/G32` (thus `SCL=33`, `SDA=32`).
+- Grove `G1/G2` do AtomS3 corresponde a `G33/G32` do StickC (ou seja, `SCL=33`, `SDA=32`).
+- M5StickC Plus (1.1 / Plus2) usa buzzer PWM, sem caminho de speaker completo.
+- No StickS3, o firmware liga `EXT_5V` (`M5.Power.setExtOutput(true)`) no boot pra alimentar o módulo Grove externo.
+- Se a sua fiação usa pinos diferentes, ajuste `kSdaPin`/`kSclPin` em `src/main.cpp`.
 
-Audio note:
+## Estrutura
 
-- M5StickC Plus (1.1 / Plus2) use **PWM buzzer** (no full speaker path).
-
-If your wiring uses different pins, update `kSdaPin` and `kSclPin`.
-
-For M5StickS3 target, firmware enables `EXT_5V` power output (`M5.Power.setExtOutput(true)`) at boot so Grove port can power external modules.
-
-## UI and Button Control
-
-Single main button: `BtnA`
-
-CardPuter / CardPuter ADV keyboard shortcuts (recommended):
-
-- `Direction Up/Left`: previous item (also supports `W/A/H/I/K` aliases)
-- `Direction Down/Right`: next item (also supports `S/D/J/L` aliases)
-- `Enter`: confirm / enter feature
-- `ESC` (or `Del` fallback): back / cancel
-
-M5Paper controls:
-
-- Tap a home-screen tile to open Reader, Read NDEF, Emulator, Diagnose, or the other available tools.
-- The UI uses the native `540 x 960` portrait orientation.
-- Tap `< Back` in the top status bar to return home; battery level and percentage are shown at the right.
-- Button C: previous item / back when held.
-- Button B: select / confirm when held.
-- Button A: next item.
-- E-ink screens refresh only when their displayed state changes; LCD-style animation and marquee redraws are intentionally replaced by final-state updates.
-
-### Home page
-
-- **Single click**: rotate feature card (`Diagnose -> Reader -> Read NDEF -> Emulator`)
-- **Long press (~1s)**: enter current feature
-- **Keyboard**: direction keys switch feature, `Enter` enters feature
-
-### Reader page
-
-- Auto-polls and displays detected card protocol/ID
-- Plays protocol-dependent tone after detecting a new card
-- **Single click**: force immediate scan
-- **Long press (~1s)**: go back to Home
-- **Keyboard**: direction keys toggle reader mode, `ESC` back to Home
-
-### Read NDEF page
-
-- Auto-polls NDEF at intervals
-- Plays success tone after successful read (Wi-Fi payload uses a 3-note tone)
-- **Single click**: manual NDEF scan now
-- **Long press (~1s)**: go back to Home
-- **Keyboard**: direction keys trigger scan, `ESC` back to Home
-
-### Emulator page
-
-- Menu actions: `Back`, `Start`, `Type`, `Slot`
-- **Single click**: move to next action/item
-- **Long press (~1s)**: confirm current action/item
-- **Keyboard**: direction keys move selection / slot, `Enter` confirm, `ESC` back
-- Slot range: `0` to `7`
-
-### Wi-Fi popup (from NDEF)
-
-This is an **example firmware behavior** in the current demo, not a GroveNFC hardware feature.
-
-When NDEF text contains a Wi-Fi payload like:
-
-`WIFI:T:WPA;S:YourSSID;P:YourPassword;;`
-
-- **Single click**: cancel
-- **Long press (~700ms)**: connect
-- **Keyboard**: `ESC` cancel, `Enter` connect
-
-Connection result is shown on the NDEF page (IP is shown on success).
-
-## Boot Debug Flow
-
-With `kAutoBootDebug = true` (default):
-
-- Runs one diagnose cycle at boot
-- Tries one card read + one NDEF read
-- Prints `[BOOT]` logs to serial
-- Returns to Reader page after the boot debug display window
-
-Set `kAutoBootDebug` to `false` in `src/main.cpp` to disable it.
-
-## Build and Upload (PlatformIO)
-
-1. Install PlatformIO extension in VS Code
-2. Open this project folder
-3. Build/Upload with one environment:
-  - `m5stack-atoms3`
-  - `m5stack-sticks3`
-  - `m5stack-stickcplus`
-    - `m5stack-stickcplus2` (alias of `m5stack-stickcplus`)
-  - `m5stack-cardputer` (CardPuter / CardPuter ADV shared logic)
-  - `m5stack-cardputer-adv` (alias of `m5stack-cardputer`)
-  - `m5stack-m5paper`
-4. Open Serial Monitor at `115200`
-
-Example:
-
-```bash
-pio run -e m5stack-atoms3 -t upload
-# or
-pio run -e m5stack-sticks3 -t upload
-# or
-pio run -e m5stack-stickcplus -t upload
-# or
-pio run -e m5stack-stickcplus2 -t upload
-# or
-pio run -e m5stack-cardputer -t upload
-# or
-pio run -e m5stack-cardputer-adv -t upload
-# or
-pio run -e m5stack-m5paper -t upload --upload-port /dev/cu.usbserial-XXXXXXXX
-pio device monitor -b 115200
+```
+GroveNFC/
+├── platformio.ini            ambientes de build (um por board + 3 isolados de validação)
+├── patch_m5unit_nfc.py        extra_script: só roda pro ambiente m5paper
+├── build_all.sh                builda todos os ambientes de board em sequência
+├── ROADMAP.md                   histórico de fases, decisões de escopo, pegadinhas técnicas
+└── src/
+    ├── main.cpp                  firmware principal (UI, roteamento de chip, todas as páginas)
+    ├── GroveNFC.cpp / .h          camada de driver do ST25R3916 (upstream)
+    ├── M5Paper_Config.h           config específica do target M5Paper
+    ├── ws1850s_test.cpp          sketch isolado de validação do driver WS1850S
+    ├── emv_test.cpp              sketch isolado de validação do leitor EMV
+    └── test_m5paper.cpp         teste de canvas→sprite→push pro e-ink do M5Paper
 ```
 
-## Notes
+## Build (PlatformIO)
 
-- Reader polling order is: `ISO14443A -> ISO14443B -> ISO15693 -> FeliCa`.
-- For ISO14443B, the displayed ID is PUPI-style identifier from anti-collision.
-- Emulation images are preloaded in firmware (NTAG/MIFARE/ISO15693 demo data).
-- Wi-Fi popup/connect logic belongs to the demo firmware application layer.
+```bash
+pip install --break-system-packages -U platformio   # ou pipx install platformio
+```
+
+Ambientes de board disponíveis:
+
+- `m5stack-atoms3`
+- `m5stack-sticks3`
+- `m5stack-stickcplus`
+- `m5stack-cardputer`
+- `m5stack-m5paper`
+
+```bash
+pio run -e m5stack-sticks3 -t upload -t monitor
+# troca m5stack-sticks3 pelo ambiente do seu board
+```
+
+Ambientes isolados de validação (não fazem parte do firmware principal — cada um exclui `main.cpp`/`GroveNFC.cpp` do build):
+
+- `ws1850s-test` — valida leitura MIFARE/NTAG no WS1850S puro
+- `emv-test` — valida o fluxo EMV completo (RATS → PPSE → GPO → PAN)
+- `m5stack-m5paper-test` — valida o pipeline de desenho no e-ink
+
+```bash
+pio run -e emv-test -t upload -t monitor
+```
+
+## UI e controle de botões
+
+Botão principal: `BtnA` (StickS3/AtomS3/CardPuter), `BtnB` (M5Paper, via touch).
+
+- **Home**: clique troca de card (`Diagnose → Reader → Read NDEF → Emulator`); hold (~380ms StickS3, varia por board) entra na funcionalidade.
+- **Reader / Read NDEF**: clique força leitura imediata; hold volta pra Home.
+- **Emulator**: clique avança item/ação; hold confirma.
+- **CardPuter**: setas (ou `WASD`/`HJKL`) navegam, `Enter` confirma, `ESC`/`Del` volta.
+- **M5Paper**: toque direto nos cards da home; botão C volta, botão B confirma, botão A avança.
+
+Feedback visual: uma barra fina no rodapé da tela enche durante o hold, proporcional ao tempo até a ação disparar (não disponível no M5Paper — e-ink é lento demais pra overlay por tick).
+
+## Licença
+
+**GPLv3 ou posterior** (GNU General Public License v3.0-or-later).
+
+- Texto completo em [`LICENSE`](LICENSE) (canônico, SHA-256 `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986`).
+- Cada arquivo fonte deste fork tem header SPDX `GPL-3.0-or-later`.
+- Forks e derivados devem ser redistribuídos sob a mesma licença.

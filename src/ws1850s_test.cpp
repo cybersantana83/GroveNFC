@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // [FORK] Standalone validation sketch for the WS1850S chip (RFID Unit 2),
 // using arozcan/MFRC522-I2C-Library. Not part of the main firmware yet.
 //

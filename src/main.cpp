@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifdef APP_TARGET_M5PAPER
 // M5Paper: use M5Unified which has built-in IT8951 e-ink panel support via LovyanGFX
 #include <M5Unified.h>
