@@ -13,6 +13,7 @@ Fork de [whywilson/GroveNFC](https://github.com/whywilson/GroveNFC). Parte do la
 
 - **Detecção automática de chip** — scan de I2C no boot identifica `ST25R3916` (`0x48`, produto "Unit NFC" — FeliCa/ISO15693/emulação completa) ou `WS1850S` (`0x28`, produto "RFID Unit 2" — ISO14443A/MIFARE/NTAG, sem emulação), e roteia pro driver certo sem o usuário precisar configurar nada. Antes disso, conectar o módulo "errado" dava um `NFC Fail` genérico sem nenhuma pista do motivo.
 - **Leitor EMV (read-only)** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2 e o AIP (tag `82`). Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). O resultado é um **dossiê** (bandeira, PAN, AID, AIP e o perfil de autenticação que o AIP indica — SDA/DDA/CDA, com vetor de ataque público conhecido, ano e risco — ver `src/emv_db.h`/`.cpp`), no mesmo espírito do `cards_db` do [ChaosID](https://github.com/cybersantana83/ChaosID). Hoje validado em `src/emv_test.cpp` (ambiente isolado); portar pra uma tela no firmware principal é o próximo passo.
+- **Dossiê para qualquer tipo de cartão (não só EMV)** — `src/cards_db.h`/`.cpp` é o mesmo `cards_db` do ChaosID portado (seção HF, já que os módulos Grove são 13.56MHz — sem LF/125kHz), mapeando o protocolo que o Reader já detecta (`MFC1K`, `MFC4K`, `MFUL`, `NTAG*`, `DESFire`, `FeliCa`, `ISO15693`, `ISO14443B`) pro mesmo tipo de perfil: uso típico, criptografia, vetor de ataque conhecido, ano e risco. Validado em `src/ws1850s_test.cpp` (ambiente isolado).
 - **Leitor FIDO2 NFC (planejado)** — vai reaproveitar a mesma base ISO14443-4 do leitor EMV (`sendIBlock()`, com WTX e chaining já resolvidos). Ferramenta separada da pesquisa **Chaos IAM**, sem compartilhar branding/metadados com ela.
 - **Usabilidade da UI** — corrigido: cliques perdidos durante a animação de transição da home (~240ms) e falta de feedback visual durante o hold do botão (agora tem uma barra de progresso). Falta documentar o mapeamento de botões por board.
 
@@ -57,6 +58,7 @@ GroveNFC/
     ├── ws1850s_test.cpp          sketch isolado de validação do driver WS1850S
     ├── emv_test.cpp              sketch isolado de validação do leitor EMV
     ├── emv_db.h / emv_db.cpp     dossiê EMV: perfil SDA/DDA/CDA a partir do AIP lido
+    ├── cards_db.h / cards_db.cpp dossiê genérico (MIFARE/NTAG/DESFire/FeliCa/ISO15693/ISO14443B)
     └── test_m5paper.cpp         teste de canvas→sprite→push pro e-ink do M5Paper
 ```
 

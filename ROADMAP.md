@@ -168,6 +168,18 @@ aplicação em vez de por chip.
       público conhecido), e "nenhum" (cartão sem autenticação offline —
       não necessariamente frágil, só fora do que esse dossiê classifica).
 
+      **Dossiê não fica só no EMV** — `src/cards_db.h`/`.cpp` porta a
+      seção HF do `cards_db` do ChaosID (as entradas LF — EM4100, HID
+      Prox, Indala, AWID, T5577 — não se aplicam aqui: os módulos Grove
+      são 13.56MHz, sem caminho de 125kHz) pro **Reader comum**, mapeando
+      o protocolo que `protocolFull()`/`readWs1850sCard()` já produzem
+      (`MFC1K`, `MFC4K`, `MFUL`, `NTAG*`, `DESFire`, `FeliCa`, `ISO15693`,
+      `ISO14443B`) pro mesmo formato de dossiê (uso típico, criptografia,
+      vetor de ataque, ano, risco). Validado em `src/ws1850s_test.cpp`
+      (MIFARE Classic/Ultralight real); os protocolos que só o ST25R3916
+      lê (FeliCa, ISO15693, ISO14443B, DESFire) ainda não foram testados
+      com hardware real nesse dossiê — só portados da tabela do ChaosID.
+
       **Por que foi bem mais trabalhoso que o Reader normal**: cartões EMV
       usam ISO14443-4 (camada 4, com APDUs), que a `MFRC522-I2C-Library`
       não implementa nativamente (só camada 3, tipo MIFARE). Construímos
