@@ -36,11 +36,34 @@ limpo, e leitura real confirmada (`MFC 1K`, UID `AD2A19D4`).
 
 ## Fase 1 — Usabilidade da UI (botão único)
 
-- [ ] Dar feedback visual durante o hold (barra de progresso ou highlight
-      crescente) em vez de só "nada acontece até completar ~380ms".
-- [ ] Não descartar cliques que caem dentro da janela de animação de
-      transição de tile (~240ms) — hoje o loop principal faz `return`
-      antes de processar qualquer navegação nesse intervalo.
+- [x] **Feedback visual durante o hold**: barra fina (3px) no rodapé da
+      tela, desenhada direto em `M5.Display` a cada tick de `loop()`
+      (`drawHoldProgressBar()`), independente do que `drawScreen()` esteja
+      fazendo naquele momento — enche proporcionalmente a `kHoldPressMs`
+      enquanto o botão principal (`mainButtonIsPressed()`) estiver pressionado
+      e some no release ou no latch do hold.
+      **Escopo desta primeira passada**: cobre o hold do botão principal
+      (`hold_enter`, `hold_connect`, `hold_dumps`, `hold_go_home`, etc. —
+      é a maioria dos 8 pontos de hold no `main.cpp`, todos no mesmo botão).
+      **Não cobre ainda**: o hold do botão secundário de "voltar/cancelar"
+      (`nav_back`/`key_nav.cancel`, que no StickS3/StickC Plus é um botão
+      físico diferente — `BtnPWR`/`BtnB` vs `BtnA`). Dá pra estender depois
+      com uma segunda barra ou cor diferente se fizer falta.
+      Desativado no M5Paper de propósito — refresh e-ink é lento/flicker
+      demais pra overlay por tick, e o hold lá já é generoso (500ms).
+- [x] **Não descartar cliques na janela de animação de transição (~240ms)**:
+      achada a causa raiz — o bloco `if (in_home && home_anim_active)` no
+      `loop()` fazia `drawScreen(); delay(10); return;` incondicional
+      enquanto a animação do carrossel da home estava rodando. Como
+      `wasClicked()`/`wasReleased()` são *one-shot* (a borda já foi
+      consumida pelo `M5.update()` daquele mesmo tick, antes desse bloco),
+      qualquer clique/hold que caísse ali virava `return` sem nunca chegar
+      no bloco de navegação da home (que já sabe re-direcionar uma animação
+      em andamento — ver os `home_anim_to != to_page` mais abaixo). Corrigido
+      calculando `has_pending_home_input` (clique, prev/next/back do
+      teclado, confirm, ou hold em andamento) e só tomando o caminho rápido
+      "só anima, nada pra tratar" quando não há nada pendente — caso
+      contrário o fluxo cai pro tratamento normal de navegação da home.
 - [ ] Documentar no README o mapeamento real de botões por board
       (ex: StickS3 usa `BtnA` pra próximo/confirmar e `BtnPWR`/`BtnB`
       pra voltar — isso hoje não está escrito em lugar nenhum).
@@ -180,9 +203,11 @@ aplicação em vez de por chip.
 - [ ] **Usabilidade da UI** (itens que já estavam na Fase 1, consolidados
       aqui por fazerem parte do mesmo esforço de "deixar usável de
       verdade" antes de adicionar mais leitores):
-      - Feedback visual durante o hold do botão (barra de progresso).
-      - Não descartar cliques na janela de animação de transição (~240ms).
-      - Documentar no README o mapeamento real de botões por board.
+      - [x] Feedback visual durante o hold do botão (barra de progresso) —
+        ver detalhes na Fase 1.
+      - [x] Não descartar cliques na janela de animação de transição
+        (~240ms) — ver detalhes na Fase 1.
+      - [ ] Documentar no README o mapeamento real de botões por board.
 
 ## Fase 3 — Migração gradual
 

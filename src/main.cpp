@@ -470,6 +470,38 @@ inline bool mainButtonReleased() {
 #endif
 }
 
+inline bool mainButtonIsPressed() {
+#ifdef APP_TARGET_M5PAPER
+  return M5.BtnB.isPressed();
+#else
+  return M5.BtnA.isPressed();
+#endif
+}
+
+// Hold-to-confirm visual feedback: a thin bar that fills while the main
+// button is held, so the person can see how close they are to triggering
+// a hold action (hold_enter, hold_connect, hold_dumps, etc. all use the
+// same kHoldPressMs threshold) instead of guessing. `pct` is 0-100; 0
+// clears the bar back to background. Drawn directly on M5.Display so it
+// doesn't depend on, or get skipped by, whatever drawScreen() is doing on
+// a given tick. Skipped on M5Paper: e-ink refresh is too slow/flickery
+// for a per-tick overlay, and the 500ms hold there is already generous.
+void drawHoldProgressBar(uint8_t pct) {
+#ifndef APP_TARGET_M5PAPER
+  auto& d = M5.Display;
+  const int w = d.width();
+  const int bar_h = 3;
+  const int y = d.height() - bar_h;
+  const int filled_w = static_cast<int>((static_cast<uint32_t>(w) * pct) / 100);
+  if (filled_w > 0) {
+    d.fillRect(0, y, filled_w, bar_h, TFT_CYAN);
+  }
+  if (filled_w < w) {
+    d.fillRect(filled_w, y, w - filled_w, bar_h, TFT_BLACK);
+  }
+#endif
+}
+
 struct KeyNavState {
   bool next = false;
   bool prev = false;
@@ -8279,6 +8311,29 @@ void loop() {
     btn_hold_latched = false;
   }
 
+  // Hold-to-confirm progress bar: runs every tick, ahead of every
+  // page-specific branch below (several of which `return` early), so it
+  // never gets starved by whichever screen is active.
+  {
+    static uint32_t s_hold_since_ms = 0;
+    static uint8_t s_last_drawn_pct = 0;
+    const bool held_now = mainButtonIsPressed() && !btn_hold_latched;
+    if (held_now) {
+      if (s_hold_since_ms == 0) s_hold_since_ms = millis();
+    } else {
+      s_hold_since_ms = 0;
+    }
+    uint8_t pct = 0;
+    if (s_hold_since_ms != 0) {
+      const uint32_t held_ms = millis() - s_hold_since_ms;
+      pct = static_cast<uint8_t>(min(static_cast<uint32_t>(100), (held_ms * 100) / kHoldPressMs));
+    }
+    if (pct != s_last_drawn_pct) {
+      drawHoldProgressBar(pct);
+      s_last_drawn_pct = pct;
+    }
+  }
+
 #ifdef APP_TARGET_M5PAPER
   if (handleM5PaperStatusTouch()) {
     delay(10);
@@ -8413,9 +8468,22 @@ void loop() {
     if (now - home_anim_start_ms >= home_anim_duration_ms) {
       home_anim_active = false;
     }
-    drawScreen();
-    delay(10);
-    return;
+    // Don't swallow a button edge that landed mid-animation: wasClicked()/
+    // wasReleased() are one-shot (M5.update() already consumed them this
+    // tick), so returning unconditionally here used to drop any next/prev/
+    // confirm press made during the ~240ms transition window. Take the
+    // "just animate, nothing to handle" fast path only when there's really
+    // no pending input; otherwise fall through to the normal in_home
+    // handling below, which already knows how to retarget an in-flight
+    // animation (see the `home_anim_to != to_page` checks there).
+    const bool has_pending_home_input =
+        clicked || nav_prev || nav_back || key_nav.confirm ||
+        (mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched);
+    if (!has_pending_home_input) {
+      drawScreen();
+      delay(10);
+      return;
+    }
 #endif
   }
 
