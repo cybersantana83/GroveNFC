@@ -3789,17 +3789,40 @@ bool loadDumpIntoEmulator(const String& path) {
   return emu_started;
 }
 
+#if defined(APP_TARGET_STICKS3)
+// [FORK] Implemented further down (next to readWs1850sCard()), where
+// mfrc522_ws1850s is declared. Forward-declared here so
+// quickCloneAndEmulate() (defined above that point in the file) can dispatch
+// to them when the WS1850S secondary driver is the one active.
+bool readWs1850sNtagFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len);
+bool readWs1850sMifareClassicFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len,
+                                       uint8_t& sectors_ok, uint8_t& sectors_total);
+#endif
+
 // [FORK] "Scan & Clone" - the Emulator-page menu action that reads a real
-// NTAG213/215/216 card and starts emulating it immediately, entirely in
-// RAM: no JSON/.bin dump file is ever written to LittleFS, so repeated
-// clone-and-emulate cycles can't fill up flash or crash the device the way
-// saved dump files could. Only NTAG213/215/216 are supported so far (the
-// user's explicit "easiest first" choice); other emulator-supported types
-// (Mifare Classic, ISO15693, FeliCa) still require loading a saved dump via
-// "Load Dump" until their own scan paths are added.
+// card and starts emulating it immediately, entirely in RAM: no JSON/.bin
+// dump file is ever written to LittleFS, so repeated clone-and-emulate
+// cycles can't fill up flash or crash the device the way saved dump files
+// could.
+//
+// Which chip does the reading depends on what's on the bus: when the
+// WS1850S secondary driver is active (nfc_ws1850s_active, StickS3 only) it
+// reads NTAG213/215/216 *and* MIFARE Classic 1K/4K (dictionary-attack
+// authentication, best effort per sector); otherwise this falls back to the
+// primary "nfc" object's own NTAG-only read path (ST25R3916/"Unit NFC" or
+// CR95HF/GroveNFC boards that have no WS1850S at all). Either way, the
+// upload-and-emulate step always goes through the primary "nfc" object
+// (nfc.uploadEmulationDump() + startCurrentEmulation()), since the WS1850S
+// chip itself has no emulation capability - see README.md's hardware table.
+// ISO15693 and FeliCa still require loading a saved dump via "Load Dump"
+// until their own scan paths are added.
 bool quickCloneAndEmulate() {
   if (!nfc_ready) {
-    emu_dump_status = "NFC not ready";
+    // Covers both "no second NFC chip at all" and "only WS1850S is on the
+    // bus" - in the latter case the read below could still succeed, but
+    // there would be nothing able to emulate the result, so fail fast with
+    // a message that says why instead of a generic "Upload failed" later.
+    emu_dump_status = nfc_ws1850s_active ? "No Unit NFC - can't emulate" : "NFC not ready";
     return false;
   }
 
@@ -3807,14 +3830,37 @@ bool quickCloneAndEmulate() {
   size_t dump_len = 0;
   CardInfo card;
   bool read_ok = false;
+  uint8_t mf_sectors_ok = 0;
+  uint8_t mf_sectors_total = 0;
+  const bool is_mifare_classic_type = (emu_type == EmuType::MF1K || emu_type == EmuType::MF4K);
+  const bool is_ntag_type = (emu_type == EmuType::N213 || emu_type == EmuType::N215 || emu_type == EmuType::N216);
 
-  if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(1500)) == pdTRUE) {
-    read_ok = nfc.readNtagFullDump(card, scan_dump, sizeof(scan_dump), dump_len);
-    xSemaphoreGive(nfc_mutex);
+#if defined(APP_TARGET_STICKS3)
+  if (nfc_ws1850s_active) {
+    if (is_mifare_classic_type) {
+      read_ok = readWs1850sMifareClassicFullDump(card, scan_dump, sizeof(scan_dump), dump_len,
+                                                  mf_sectors_ok, mf_sectors_total);
+    } else if (is_ntag_type) {
+      read_ok = readWs1850sNtagFullDump(card, scan_dump, sizeof(scan_dump), dump_len);
+    } else {
+      emu_dump_status = "Scan unsupported for this type";
+      return false;
+    }
+  } else
+#endif
+  {
+    if (!is_ntag_type) {
+      emu_dump_status = "Scan needs WS1850S for this type";
+      return false;
+    }
+    if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(1500)) == pdTRUE) {
+      read_ok = nfc.readNtagFullDump(card, scan_dump, sizeof(scan_dump), dump_len);
+      xSemaphoreGive(nfc_mutex);
+    }
   }
 
   if (!read_ok || !card.valid) {
-    emu_dump_status = "No NTAG found";
+    emu_dump_status = "No card / read failed";
     return false;
   }
 
@@ -3822,6 +3868,8 @@ bool quickCloneAndEmulate() {
   if (card.protocol == "NTAG213") detected = EmuType::N213;
   else if (card.protocol == "NTAG215") detected = EmuType::N215;
   else if (card.protocol == "NTAG216") detected = EmuType::N216;
+  else if (card.protocol == "MFC1K") detected = EmuType::MF1K;
+  else if (card.protocol == "MFC4K") detected = EmuType::MF4K;
   else {
     emu_dump_status = "Unsupported tag";
     return false;
@@ -3857,7 +3905,12 @@ bool quickCloneAndEmulate() {
   emu_dump_loaded_path[type_idx] = "";
   emu_dump_loaded_uid[type_idx] = card.uid;
 
-  emu_dump_status = "Cloned " + card.protocol + " " + card.uid + " (not saved)";
+  if (detected == EmuType::MF1K || detected == EmuType::MF4K) {
+    emu_dump_status = "Cloned " + card.protocol + " " + card.uid + " sect " +
+                       String(mf_sectors_ok) + "/" + String(mf_sectors_total) + " (not saved)";
+  } else {
+    emu_dump_status = "Cloned " + card.protocol + " " + card.uid + " (not saved)";
+  }
 
   m5paper_emu_hex_offset = 0;
   emu_switch_apply_pending = false;
@@ -7404,6 +7457,200 @@ bool readWs1850sCard(CardInfo& card) {
   return true;
 }
 
+// [FORK] NTAG213/215/216 full-memory read via the WS1850S secondary driver,
+// for quickCloneAndEmulate()'s "Scan & Clone". Same GET_VERSION + 4-page
+// READ loop as GroveNFC::readNtagFullDump(), just issued through
+// mfrc522_ws1850s's own PCD_CalculateCRC()/PCD_TransceiveData() (the
+// MFRC522_I2C library) instead of GroveNFC's internal txrx().
+bool readWs1850sNtagFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len) {
+  dump_len = 0;
+  card.valid = false;
+
+  byte bufferATQA[2];
+  byte bufferSize = sizeof(bufferATQA);
+  byte wakeupStatus = mfrc522_ws1850s.PICC_WakeupA(bufferATQA, &bufferSize);
+  if (wakeupStatus != MFRC522::STATUS_OK && wakeupStatus != MFRC522::STATUS_COLLISION) {
+    return false;
+  }
+  if (!mfrc522_ws1850s.PICC_ReadCardSerial()) {
+    return false;
+  }
+
+  byte cmd[4] = {0x60, 0, 0, 0};  // GET_VERSION
+  if (mfrc522_ws1850s.PCD_CalculateCRC(cmd, 1, &cmd[1]) != MFRC522::STATUS_OK) {
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+  byte rx[16] = {0};
+  byte rx_len = sizeof(rx);
+  const byte status = mfrc522_ws1850s.PCD_TransceiveData(cmd, 3, rx, &rx_len, nullptr, 0, true);
+  if (status != MFRC522::STATUS_OK || rx_len < 8 || rx[2] != 0x04) {
+    // Not an NTAG (wrong ic_type, or GET_VERSION unsupported - plain
+    // Ultralight/NTAG203). Cloning those isn't implemented yet.
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+
+  uint16_t total_pages = 0;
+  const uint8_t storage_sz = rx[6];
+  if (storage_sz == 0x0F) { card.protocol = "NTAG213"; total_pages = 45; }
+  else if (storage_sz == 0x11) { card.protocol = "NTAG215"; total_pages = 135; }
+  else if (storage_sz == 0x13) { card.protocol = "NTAG216"; total_pages = 231; }
+  else {
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+
+  const size_t needed = static_cast<size_t>(total_pages) * 4;
+  if (needed > dump_capacity) {
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+
+  for (uint16_t page = 0; page < total_pages; page += 4) {
+    byte block[18];
+    byte block_len = sizeof(block);
+    if (mfrc522_ws1850s.MIFARE_Read(static_cast<byte>(page), block, &block_len) != MFRC522::STATUS_OK) {
+      mfrc522_ws1850s.PICC_HaltA();
+      return false;
+    }
+    const size_t offset = static_cast<size_t>(page) * 4;
+    const size_t copy_n = min(static_cast<size_t>(16), needed - offset);
+    memcpy(dump + offset, block, copy_n);
+  }
+
+  String uid_str;
+  for (byte i = 0; i < mfrc522_ws1850s.uid.size; i++) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02X", mfrc522_ws1850s.uid.uidByte[i]);
+    uid_str += buf;
+  }
+  card.uid = uid_str;
+  card.valid = true;
+  dump_len = needed;
+  mfrc522_ws1850s.PICC_HaltA();
+  return true;
+}
+
+// [FORK] MIFARE Classic 1K/4K full-memory read via the WS1850S secondary
+// driver's native hardware CRYPTO1 (MFRC522_I2C library's PCD_Authenticate):
+// tries a small well-known default-key dictionary per sector (Key A then Key
+// B), the same "quick clone against an unknown card" approach Flipper/
+// Proxmark use. A sector that no dictionary key opens is left zeroed in the
+// dump - so a card with some custom-keyed sectors still clones as "best
+// effort" - and sectors_ok/sectors_total tell the caller how much of the
+// card was actually recovered, so the status line can be honest about it.
+bool readWs1850sMifareClassicFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len,
+                                       uint8_t& sectors_ok, uint8_t& sectors_total) {
+  dump_len = 0;
+  sectors_ok = 0;
+  sectors_total = 0;
+  card.valid = false;
+
+  byte bufferATQA[2];
+  byte bufferSize = sizeof(bufferATQA);
+  byte wakeupStatus = mfrc522_ws1850s.PICC_WakeupA(bufferATQA, &bufferSize);
+  if (wakeupStatus != MFRC522::STATUS_OK && wakeupStatus != MFRC522::STATUS_COLLISION) {
+    return false;
+  }
+  if (!mfrc522_ws1850s.PICC_ReadCardSerial()) {
+    return false;
+  }
+
+  const byte picc_type = mfrc522_ws1850s.PICC_GetType(mfrc522_ws1850s.uid.sak);
+  uint16_t total_blocks;
+  if (picc_type == MFRC522::PICC_TYPE_MIFARE_1K) {
+    card.protocol = "MFC1K";
+    total_blocks = 64;
+  } else if (picc_type == MFRC522::PICC_TYPE_MIFARE_4K) {
+    card.protocol = "MFC4K";
+    total_blocks = 256;
+  } else {
+    // Mini/Ultralight/etc. - not a Classic card, nothing to authenticate.
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+
+  const size_t needed = static_cast<size_t>(total_blocks) * 16;
+  if (needed > dump_capacity) {
+    mfrc522_ws1850s.PICC_HaltA();
+    return false;
+  }
+  memset(dump, 0, needed);
+
+  // [FORK] Small well-known default-key dictionary, same spirit as
+  // Flipper/Proxmark's built-in lists - a lot of demo/hobbyist cards and
+  // plenty of real-world access cards still use one of these.
+  static const uint8_t kKeyDict[][6] = {
+      {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // factory default
+      {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},
+      {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},
+      {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},
+      {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD},
+      {0x1A, 0x98, 0x2C, 0x7E, 0x45, 0x9A},
+      {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},
+  };
+  constexpr size_t kKeyDictCount = sizeof(kKeyDict) / sizeof(kKeyDict[0]);
+
+  String uid_str;
+  for (byte i = 0; i < mfrc522_ws1850s.uid.size; i++) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02X", mfrc522_ws1850s.uid.uidByte[i]);
+    uid_str += buf;
+  }
+  card.uid = uid_str;
+
+  const uint16_t total_sectors = (total_blocks == 64) ? 16 : 40;  // 1K: 16x4; 4K: 32x4 + 8x16
+  for (uint16_t s = 0; s < total_sectors; s++) {
+    sectors_total++;
+    const uint8_t blocks_in_sector = (s < 32) ? 4 : 16;
+    const uint16_t sector_start_block = (s < 32) ? (s * 4) : (128 + (s - 32) * 16);
+    const uint16_t trailer_block = sector_start_block + blocks_in_sector - 1;
+
+    bool authed = false;
+    for (size_t k = 0; k < kKeyDictCount && !authed; k++) {
+      MFRC522::MIFARE_Key key;
+      memcpy(key.keyByte, kKeyDict[k], 6);
+      byte auth_status = mfrc522_ws1850s.PCD_Authenticate(
+          MFRC522::PICC_CMD_MF_AUTH_KEY_A, static_cast<byte>(trailer_block), &key, &mfrc522_ws1850s.uid);
+      if (auth_status == MFRC522::STATUS_OK) {
+        authed = true;
+      } else {
+        auth_status = mfrc522_ws1850s.PCD_Authenticate(
+            MFRC522::PICC_CMD_MF_AUTH_KEY_B, static_cast<byte>(trailer_block), &key, &mfrc522_ws1850s.uid);
+        if (auth_status == MFRC522::STATUS_OK) authed = true;
+      }
+    }
+
+    if (authed) {
+      bool sector_ok = true;
+      for (uint8_t b = 0; b < blocks_in_sector; b++) {
+        const uint16_t block = sector_start_block + b;
+        byte buf[18];
+        byte len = sizeof(buf);
+        if (mfrc522_ws1850s.MIFARE_Read(static_cast<byte>(block), buf, &len) != MFRC522::STATUS_OK) {
+          sector_ok = false;
+          break;
+        }
+        memcpy(dump + static_cast<size_t>(block) * 16, buf, 16);
+      }
+      if (sector_ok) sectors_ok++;
+      mfrc522_ws1850s.PCD_StopCrypto1();
+    }
+    // Sectors we couldn't authenticate stay zeroed in the dump.
+  }
+
+  mfrc522_ws1850s.PICC_HaltA();
+  if (sectors_ok == 0) {
+    // Nothing usable came back - don't hand the caller an all-zero "clone".
+    return false;
+  }
+  dump_len = needed;
+  card.valid = true;
+  return true;
+}
+
 // [FORK] EMV dossier reader, ported from src/emv_test.cpp (validated
 // end-to-end on real hardware there) onto the main firmware's mfrc522_ws1850s
 // object. Same RATS -> SELECT PPSE -> SELECT AID -> GPO flow, same ISO14443-4
@@ -9012,6 +9259,21 @@ void setup() {
 #endif
   } else {
     nfc_ready = initNfcAtBoot();
+#if defined(APP_TARGET_STICKS3)
+    // [FORK] Both modules on the bus at once: WS1850S ("RFID 2") does the
+    // reading for Reader/EMV/FIDO2/Scan&Clone, the other chip found above
+    // (ST25R3916 "Unit NFC", or the original CR95HF GroveNFC) does the
+    // emulation. Previously this branch only ever ran initNfcAtBoot() and
+    // left the WS1850S secondary driver uninitialized whenever a second
+    // chip was also present, silently disabling Reader/EMV/FIDO2/Scan&Clone
+    // the moment both modules were wired up together.
+    if (found_ws1850s) {
+      mfrc522_ws1850s.PCD_Init();
+      nfc_ws1850s_active = true;
+      boot_notice_line = "WS1850S+UnitNFC: leitura e emulacao ativas";
+      Serial.println("[BOOT] WS1850S + second NFC chip both detected - both drivers initialized");
+    }
+#endif
   }
   // [FORK] Kept short on purpose - this is drawn as big centered/watermark
   // text in a few places (StickS3 home brand, Reader page watermark) with no
@@ -9403,8 +9665,9 @@ void loop() {
           delay(10);
           return;
         } else if (selected == 2) {
-          // [FORK] "Scan & Clone" - read a live NTAG card and start
-          // emulating it right away, without ever saving a dump file.
+          // [FORK] "Scan & Clone" - read a live NTAG or MIFARE Classic card
+          // (whichever matches the currently selected emulator type) and
+          // start emulating it right away, without ever saving a dump file.
           quickCloneAndEmulate();
           emu_config_stage = EmuConfigStage::None;
           emu_show_menu = false;
