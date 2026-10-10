@@ -28,6 +28,7 @@ jobs:
           - m5stack-m5paper-test
           - ws1850s-test
           - emv-test
+          - fido2-test
     steps:
       - uses: actions/checkout@v4
 

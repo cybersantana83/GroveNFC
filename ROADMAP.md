@@ -129,7 +129,7 @@ não reconhece o endereço.
       (nome comercial, chip, endereço I2C, protocolos suportados), já
       que hoje nada no repo avisa que "GroveNFC" mira um chip específico.
 
-## Fase 2 — Leitores + usabilidade (escopo redefinido em 06/08)
+## Fase 2 — Leitores + usabilidade (escopo redefinido em 06/08) ✅ CONCLUÍDA
 
 **Mudança de escopo**: EMV manipulation, Relay/MITM e o rig de PN532Killer
 saem do plano — decidido não seguir por esse caminho no fork. Foco vira
@@ -223,16 +223,36 @@ aplicação em vez de por chip.
       **Reaproveitável pro FIDO2**: o `sendIBlock()` (com WTX + chaining +
       todas as correções acima) é genérico — qualquer troca de APDU sobre
       ISO14443-4 usa a mesma base, incluindo FIDO2/CTAP2.
-- [ ] **Leitor FIDO2 NFC (read-only)** — ler resposta de authenticators
-      FIDO2/CTAP2 via NFC (comandos APDU de autenticação/get-info) e
-      mostrar dados estruturados na tela. **Importante**: isso é uma
-      ferramenta nova, separada do `fido2-nfc-scanner` (Flipper FAP) e da
-      pesquisa Chaos IAM — não misturar branding/metadados entre os dois
-      projetos.
-- [ ] **Integrar o leitor EMV no firmware principal** — hoje só existe em
-      `src/emv_test.cpp` (ambiente isolado `emv-test`). Falta portar pra
-      uma tela nova no `main.cpp` (mesmo padrão do `readCardGeneric()`),
-      com número completo na tela (decisão explícita: sem máscara).
+- [x] **Leitor FIDO2 NFC (read-only)** — validado em ambiente isolado
+      (`src/fido2_test.cpp`, ambiente `fido2-test`): `RATS` → `SELECT`
+      no applet FIDO (`A0000006472F0001`) → `authenticatorGetInfo`
+      (CTAP2, comando `0x04`) sobre o mesmo `sendIBlock()` (WTX +
+      chaining) já validado no EMV. Dump bruto (hex + varredura ASCII),
+      sem parser de CBOR — é validação de alcance/transporte, não um
+      client CTAP2 completo.
+      - **Correção importante**: o AID usado para SELECT é
+        `A0000006472F0001` (registrado pela FIDO Alliance para
+        CTAP/U2F sobre NFC). Uma nota de planejamento anterior deste
+        repo tinha citado `D2760000850101` por engano — esse é o AID
+        da **NDEF Tag Application** (ISO 7816-4 genérico de tags tipo
+        4), não tem nada a ver com FIDO. Corrigido antes de qualquer
+        hardware real ser testado contra o AID errado.
+      - **Importante (branding)**: isso é uma ferramenta nova, separada
+        do `fido2-nfc-scanner` (Flipper FAP) e da pesquisa Chaos IAM —
+        nenhum tipo, nome ou metadado compartilhado entre os dois
+        projetos.
+      - Ainda não testado contra uma security key FIDO2 real (só a
+        lógica de transporte foi exercitada/revisada) — primeiro teste
+        em hardware fica para quando o `.fap`/firmware for flashado.
+- [x] **Integrar o leitor EMV no firmware principal** — portado de
+      `src/emv_test.cpp` pra uma página nova em `main.cpp`
+      (`MenuPage::EmvReader`), seguindo o mesmo padrão Core-0/Core-1 do
+      Reader/Piano (worker faz o RATS→PPSE→SELECT→GPO, que pode levar
+      1-3s, sem travar a UI). Só aparece no carrossel da home do
+      M5StickS3 (`APP_TARGET_STICKS3`) — é o único board com o driver
+      WS1850S de fato ligado hoje; nem entra no `kHomeOrderNfcUnit` do
+      ST25R3916, que não faz APDU ISO14443-4. Número completo na tela
+      (decisão explícita: sem máscara).
 - [ ] **Usabilidade da UI** (itens que já estavam na Fase 1, consolidados
       aqui por fazerem parte do mesmo esforço de "deixar usável de
       verdade" antes de adicionar mais leitores):

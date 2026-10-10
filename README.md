@@ -9,13 +9,13 @@ Fork de [whywilson/GroveNFC](https://github.com/whywilson/GroveNFC). Parte do la
 
 ## Status
 
-**Fase 0, 1.5 e leitor EMV concluídos** — leitura real validada em hardware nos dois chips, leitor EMV extraindo PAN + bandeira de cartão real.
+**Fases 0, 1, 1.5 e 2 concluídas** — leitura real validada em hardware nos dois chips, leitor EMV com tela própria no firmware principal extraindo PAN + bandeira de cartão real, dossiê genérico pra qualquer protocolo, leitor FIDO2/CTAP2 via NFC validado em ambiente isolado, e UI com feedback de hold + mapeamento de botões documentado.
 
 - **Detecção automática de chip** — scan de I2C no boot identifica `ST25R3916` (`0x48`, produto "Unit NFC" — FeliCa/ISO15693/emulação completa) ou `WS1850S` (`0x28`, produto "RFID Unit 2" — ISO14443A/MIFARE/NTAG, sem emulação), e roteia pro driver certo sem o usuário precisar configurar nada. Antes disso, conectar o módulo "errado" dava um `NFC Fail` genérico sem nenhuma pista do motivo.
-- **Leitor EMV (read-only)** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2 e o AIP (tag `82`). Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). O resultado é um **dossiê** (bandeira, PAN, AID, AIP e o perfil de autenticação que o AIP indica — SDA/DDA/CDA, com vetor de ataque público conhecido, ano e risco — ver `src/emv_db.h`/`.cpp`), no mesmo espírito do `cards_db` do [ChaosID](https://github.com/cybersantana83/ChaosID). Hoje validado em `src/emv_test.cpp` (ambiente isolado); portar pra uma tela no firmware principal é o próximo passo.
+- **Leitor EMV (read-only), com tela própria no firmware** — `RATS` → `SELECT PPSE` → escolhe a aplicação de crédito (fallback: menor prioridade) → `SELECT AID` → `GPO` com PDOL neutro → extrai PAN do Track2 e o AIP (tag `82`). Sem escrita, sem manipulação de tag, sem máscara no número (decisão explícita). O resultado é um **dossiê** (bandeira, PAN, AID, AIP e o perfil de autenticação que o AIP indica — SDA/DDA/CDA, com vetor de ataque público conhecido, ano e risco — ver `src/emv_db.h`/`.cpp`), no mesmo espírito do `cards_db` do [ChaosID](https://github.com/cybersantana83/ChaosID). Página `EMV` no carrossel da home do M5StickS3 (único board com o driver WS1850S ligado hoje) — clique força nova leitura, hold volta pra Home. A lógica em si continua validada em `src/emv_test.cpp` (ambiente isolado) e portada 1:1 pra `src/main.cpp`.
 - **Dossiê para qualquer tipo de cartão (não só EMV)** — `src/cards_db.h`/`.cpp` é o mesmo `cards_db` do ChaosID portado (seção HF, já que os módulos Grove são 13.56MHz — sem LF/125kHz), mapeando o protocolo que o Reader já detecta (`MFC1K`, `MFC4K`, `MFUL`, `NTAG*`, `DESFire`, `FeliCa`, `ISO15693`, `ISO14443B`) pro mesmo tipo de perfil: uso típico, criptografia, vetor de ataque conhecido, ano e risco. Validado em `src/ws1850s_test.cpp` (ambiente isolado).
-- **Leitor FIDO2 NFC (planejado)** — vai reaproveitar a mesma base ISO14443-4 do leitor EMV (`sendIBlock()`, com WTX e chaining já resolvidos). Ferramenta separada da pesquisa **Chaos IAM**, sem compartilhar branding/metadados com ela.
-- **Usabilidade da UI** — corrigido: cliques perdidos durante a animação de transição da home (~240ms) e falta de feedback visual durante o hold do botão (agora tem uma barra de progresso). Falta documentar o mapeamento de botões por board.
+- **Leitor FIDO2/CTAP2 via NFC (validação isolada)** — reaproveita a mesma base ISO14443-4 do leitor EMV (`RATS` + I-block com WTX/chaining já resolvidos), mas em sketch próprio (`src/fido2_test.cpp`): `SELECT` no applet FIDO (AID `A0000006472F0001` — **não** o AID de NDEF Tag Application que uma nota antiga deste repo citou por engano) seguido de um `authenticatorGetInfo` (CTAP2). Dump bruto (hex + varredura ASCII), sem parser de CBOR — é validação de alcance/transporte, não um client CTAP2. Ferramenta separada da pesquisa **Chaos IAM**, sem compartilhar branding/metadados com ela.
+- **Usabilidade da UI** — corrigido: cliques perdidos durante a animação de transição da home (~240ms) e falta de feedback visual durante o hold do botão (agora tem uma barra de progresso). Mapeamento de botões por board documentado abaixo.
 
 Detalhes técnicos completos — pegadinhas de protocolo, decisões de escopo, histórico de cada fase — estão no [`ROADMAP.md`](ROADMAP.md).
 
@@ -47,16 +47,18 @@ Notas:
 
 ```
 GroveNFC/
-├── platformio.ini            ambientes de build (um por board + 3 isolados de validação)
+├── platformio.ini            ambientes de build (um por board + 4 isolados de validação)
 ├── patch_m5unit_nfc.py        extra_script: só roda pro ambiente m5paper
 ├── build_all.sh                builda todos os ambientes de board em sequência
 ├── ROADMAP.md                   histórico de fases, decisões de escopo, pegadinhas técnicas
 └── src/
-    ├── main.cpp                  firmware principal (UI, roteamento de chip, todas as páginas)
+    ├── main.cpp                  firmware principal (UI, roteamento de chip, todas as páginas,
+    │                             incluindo a página EMV no M5StickS3)
     ├── GroveNFC.cpp / .h          camada de driver do ST25R3916 (upstream)
     ├── M5Paper_Config.h           config específica do target M5Paper
     ├── ws1850s_test.cpp          sketch isolado de validação do driver WS1850S
     ├── emv_test.cpp              sketch isolado de validação do leitor EMV
+    ├── fido2_test.cpp            sketch isolado de validação do leitor FIDO2/CTAP2 via NFC
     ├── emv_db.h / emv_db.cpp     dossiê EMV: perfil SDA/DDA/CDA a partir do AIP lido
     ├── cards_db.h / cards_db.cpp dossiê genérico (MIFARE/NTAG/DESFire/FeliCa/ISO15693/ISO14443B)
     └── test_m5paper.cpp         teste de canvas→sprite→push pro e-ink do M5Paper
@@ -85,6 +87,7 @@ Ambientes isolados de validação (não fazem parte do firmware principal — ca
 
 - `ws1850s-test` — valida leitura MIFARE/NTAG no WS1850S puro
 - `emv-test` — valida o fluxo EMV completo (RATS → PPSE → GPO → PAN)
+- `fido2-test` — valida SELECT no applet FIDO + `authenticatorGetInfo` (CTAP2) via NFC
 - `m5stack-m5paper-test` — valida o pipeline de desenho no e-ink
 
 ```bash
@@ -113,6 +116,7 @@ Dentro de cada tela:
 
 - **Home**: clique troca de card (`Diagnose → Reader → Read NDEF → Emulator` → ...); hold entra na funcionalidade.
 - **Reader / Read NDEF**: clique força leitura imediata; hold volta pra Home.
+- **EMV** (só no M5StickS3, com WS1850S): clique força nova leitura do cartão já no leitor; hold volta pra Home.
 - **Emulator**: clique avança item/ação; hold confirma.
 
 Feedback visual: uma barra fina no rodapé da tela enche durante o hold, proporcional ao tempo até a ação disparar (não disponível no M5Paper — e-ink é lento demais pra overlay por tick).
