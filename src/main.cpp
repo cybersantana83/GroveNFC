@@ -7900,7 +7900,10 @@ void emvRunFullRead(NfcEmvResult& er) {
     '2', 'P', 'A', 'Y', '.', 'S', 'Y', 'S', '.', 'D', 'D', 'F', '0', '1',
     0x00
   };
-  byte resp[200];
+  // [FORK] static, not stack-local: emvRunFullRead() runs only on the single
+  // nfc_worker task, serialized by nfc_mutex, so there's no reentrancy risk -
+  // see the stack-size comment on the nfc_worker xTaskCreatePinnedToCore call.
+  static byte resp[200];
   uint16_t respLen = 0;
   if (!emvSendIBlock(selectPPSE, sizeof(selectPPSE), resp, respLen, sizeof(resp))) {
     er.error = "SELECT PPSE sem resposta";
@@ -7992,7 +7995,7 @@ void emvRunFullRead(NfcEmvResult& er) {
   selectAID[5 + candidates[chosen].aidLen] = 0x00;
   byte selCmdLen = 6 + candidates[chosen].aidLen;
 
-  byte selResp[200]; uint16_t selRespLen = 0;
+  static byte selResp[200]; uint16_t selRespLen = 0;
   if (!emvSendIBlock(selectAID, selCmdLen, selResp, selRespLen, sizeof(selResp))) {
     er.error = "SELECT AID sem resposta";
     return;
@@ -8022,7 +8025,7 @@ void emvRunFullRead(NfcEmvResult& er) {
   byte gpoCmdLen = 7 + pdolLen;
   gpo[gpoCmdLen++] = 0x00;
 
-  byte gpoResp[200]; uint16_t gpoRespLen = 0;
+  static byte gpoResp[200]; uint16_t gpoRespLen = 0;
   if (!emvSendIBlock(gpo, gpoCmdLen, gpoResp, gpoRespLen, sizeof(gpoResp))) {
     er.error = "GPO sem resposta";
     return;
@@ -8379,7 +8382,14 @@ void fido2RunFullRead(NfcFido2Result& fr) {
   selectFido[5 + sizeof(kFidoAid)] = 0x00;
   byte selCmdLen = 6 + sizeof(kFidoAid);
 
-  byte selResp[64];
+  // [FORK] static, not stack-local - see the stack-size comment on the
+  // nfc_worker xTaskCreatePinnedToCore call. These buffers (here, resp[],
+  // full[], chunk[] below) are what overflowed the task's original 4096-byte
+  // stack when merged into nfcWorkerTask()'s frame by single-call-site
+  // inlining; moving them off the stack fixes that regardless of inlining.
+  // Safe because fido2RunFullRead() only ever runs on the single nfc_worker
+  // task, serialized by nfc_mutex.
+  static byte selResp[64];
   uint16_t selRespLen = 0;
   if (!emvSendIBlock(selectFido, selCmdLen, selResp, selRespLen, sizeof(selResp))) {
     fr.error = "SELECT (AID FIDO) sem resposta - nao e FIDO2/U2F?";
@@ -8399,14 +8409,14 @@ void fido2RunFullRead(NfcFido2Result& fr) {
   constexpr uint16_t kFullCapacity = 600;
 
   byte getInfo[] = {0x80, 0x10, 0x80, 0x00, 0x01, 0x04, 0x00};
-  byte resp[kRespCapacity];
+  static byte resp[kRespCapacity];
   uint16_t respLen = 0;
   if (!emvSendIBlock(getInfo, sizeof(getInfo), resp, respLen, kRespCapacity)) {
     fr.error = "authenticatorGetInfo sem resposta";
     return;
   }
 
-  byte full[kFullCapacity];
+  static byte full[kFullCapacity];
   uint16_t fullLen = respLen;
   memcpy(full, resp, respLen);
 
@@ -8414,7 +8424,7 @@ void fido2RunFullRead(NfcFido2Result& fr) {
     byte more = full[fullLen - 1];
     fullLen -= 2;
     byte getResp[] = {0x00, 0xC0, 0x00, 0x00, more};
-    byte chunk[kRespCapacity];
+    static byte chunk[kRespCapacity];
     uint16_t chunkLen = 0;
     if (!emvSendIBlock(getResp, sizeof(getResp), chunk, chunkLen, kRespCapacity)) {
       fr.error = "GET RESPONSE falhou no meio do chaining";
@@ -9514,7 +9524,17 @@ void setup() {
   xTaskCreatePinnedToCore(
     nfcWorkerTask,    // task function
     "nfc_worker",     // name
-    4096,             // stack size
+    // [FORK] Was 4096. emvRunFullRead()/fido2RunFullRead() are each called
+    // from a single site inside this task's loop, so the compiler is free to
+    // inline them into nfcWorkerTask() and merge their local buffers into one
+    // stack frame. fido2RunFullRead() alone added ~1700 bytes of worst-case
+    // locals (selResp/resp/full/chunk) on top of emvRunFullRead()'s ~600 -
+    // this overflowed the old 4096 budget and crashed with "Stack canary
+    // watchpoint triggered (nfc_worker)" on the very first loop iteration.
+    // Raised with real margin; the large response buffers were also moved to
+    // static storage (see fido2RunFullRead()/emvRunFullRead()) to cut the
+    // per-call stack footprint regardless of inlining.
+    12288,            // stack size
     nullptr,          // param
     1,                // priority
     &nfc_task_handle, // handle
