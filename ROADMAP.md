@@ -267,10 +267,25 @@ aplicação em vez de por chip.
         Yubico/Identiv/FIDO Alliance (CVE pendente MITRE
         CAN-2026-2038918): nada disso exige PIN, toque ou qualquer
         autenticação do token.
-      - Ainda não testado contra uma security key FIDO2 real neste
-        firmware (a lógica de transporte e o parser foram revisados,
-        mas não exercitados em hardware) — primeiro teste fica para
-        quando o `.fap`/firmware for flashado.
+      - **Validado em hardware real** contra uma YubiKey 5C NFC (FW
+        5.7.4): vendor string `YubiKey` reconhecida no ATS, AAGUID e
+        firmware version extraídos, PIN `SET` (min. 4 dígitos),
+        resident keys, `largeBlobs`, `maxMsgSize=1536`, as 4 versões
+        CTAP2 (`U2F_V2`/`FIDO_2_0`/`FIDO_2_1_PRE`/`FIDO_2_1`) e as 5
+        extensions (`credProtect`/`hmac-secret`/`largeBlobKey`/
+        `credBlob`/`minPinLength`) — tudo sem PIN e sem toque no token.
+      - **Bug encontrado e corrigido no primeiro teste real**: os
+        tamanhos usados pra acumular a resposta do `GetInfo`
+        (`respLen`/`respCapacity`/`chunkLen`/`fullLen`/`dataLen`) eram
+        `byte` (máx. 255) e os buffers (`resp[200]`/`full[400]`)
+        pequenos demais — o `GetInfo` de uma YubiKey 5 real passa fácil
+        de 255 bytes já remontado via I-block chaining (lista grande de
+        versões/extensions/algoritmos), então a leitura abortava com
+        "Response exceeds buffer capacity" bem antes de terminar.
+        Corrigido: tamanhos passaram pra `uint16_t` em todo o caminho
+        (`sendIBlock()`/`tryGetInfo()`/`printHex()`) e os buffers foram
+        pra 512/600 bytes (mesma margem do `FIDO2_MAX_RESPONSE` do
+        `fido2-nfc-scanner`).
 - [x] **Integrar o leitor EMV no firmware principal** — portado de
       `src/emv_test.cpp` pra uma página nova em `main.cpp`
       (`MenuPage::EmvReader`), seguindo o mesmo padrão Core-0/Core-1 do
