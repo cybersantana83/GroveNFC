@@ -115,8 +115,9 @@ Notas:
 Dentro de cada tela:
 
 - **Home**: clique troca de card (`Diagnose → Reader → Read NDEF → Emulator` → ...); hold entra na funcionalidade.
-- **Reader / Read NDEF**: clique força leitura imediata; hold volta pra Home.
-- **EMV** (só no M5StickS3, com WS1850S): clique força nova leitura do cartão já no leitor; hold volta pra Home.
+- **Reader**: o resultado (dossiê) fica congelado na tela mesmo depois que o cartão sai do campo — não desaparece de imediato. Hold faz uma nova consulta (limpa o resultado e volta a escanear); o botão secundário (quando existe) volta pra Home. No AtomS3 (só 1 botão físico), hold continua voltando pra Home, já que não tem botão secundário.
+- **Read NDEF**: clique força leitura imediata; hold volta pra Home.
+- **EMV** (só no M5StickS3, com WS1850S): mesmo princípio do Reader — o dossiê (bandeira/PAN/AID/risco) fica na tela depois que o cartão é retirado. Hold faz nova consulta; `BtnPWR`/`BtnB` volta pra Home.
 - **Emulator**: clique avança item/ação; hold confirma.
 
 Feedback visual: uma barra fina no rodapé da tela enche durante o hold, proporcional ao tempo até a ação disparar (não disponível no M5Paper — e-ink é lento demais pra overlay por tick).

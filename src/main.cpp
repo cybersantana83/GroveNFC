@@ -271,6 +271,14 @@ int emu_menu_index = 0;
 uint8_t emu_type_cursor = 0;
 uint8_t emu_type_scroll = 0;
 grove_nfc::CardInfo last_card;
+// [FORK] Sticky snapshot for display only - last_card above still resets to
+// "No card" the moment the card leaves the field (other logic depends on
+// that: recovery, poll-interval pacing). This one only ever updates when a
+// NEW read actually succeeds, so the Reader page's dossier/pixel-card stay
+// on screen after the card is lifted, instead of vanishing within one poll
+// tick (~120-220ms - too fast to read). Cleared back to "no card" only on
+// hold (new query) or on leaving/re-entering the page.
+grove_nfc::CardInfo reader_display_card;
 uint32_t last_poll_ms = 0;
 bool nfc_ready = false;
 bool nfc_chip_unsupported = false;  // [FORK] true when a known-incompatible chip (e.g. WS1850S) was detected
@@ -5942,13 +5950,13 @@ void drawScreen(bool popup_only) {
       // card already respected - a fixed pixel budget carved out of the
       // bottom, not "wherever the card visual happens to end up".
       const int content_bottom = content_top + 2 + content_h - 4;
-      const int dossier_h = last_card.valid ? 44 : 0;
+      const int dossier_h = reader_display_card.valid ? 44 : 0;
       const int card_area_h = (content_h - 4) - dossier_h;
-      drawReaderPixelCard(d, 4, content_top + 2, w - 8, card_area_h, accent, last_card, reader_14b_only);
-      if (last_card.valid) {
+      drawReaderPixelCard(d, 4, content_top + 2, w - 8, card_area_h, accent, reader_display_card, reader_14b_only);
+      if (reader_display_card.valid) {
         const int dossier_y = content_bottom - dossier_h;
         d.fillRect(4, dossier_y, w - 8, dossier_h, TFT_BLACK);
-        const CardProfile* p = cardsDbFind(last_card.protocol);
+        const CardProfile* p = cardsDbFind(reader_display_card.protocol);
         String dossier = p
             ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
             : String("(sem perfil em cards_db)");
@@ -5979,22 +5987,30 @@ void drawScreen(bool popup_only) {
     } else if (menu_page == MenuPage::EmvReader) {
       // [FORK] ChaosID-style dossier for the EMV card actually on the reader -
       // see emvRunFullRead()/NfcEmvResult. WS1850S only (nfc_ws1850s_active).
+      // [FORK] emv_has_result takes priority over emv_card_present on
+      // purpose: it's the sticky result (see processEmvResult()) and must
+      // stay on screen after the card is lifted, instead of being replaced
+      // by "waiting for card" the instant emv_card_present flips to false.
+      // Only a fresh query (hold, or click, or re-entering this page)
+      // clears emv_has_result and lets the "waiting"/"reading" states show.
       String title;
       String body;
-      if (!emv_card_present) {
-        title = "EMV";
-        body = "Aproxime um cartao\nEMV (leitura somente)";
-      } else if (!emv_has_result) {
+      if (emv_has_result) {
+        if (!emv_read_ok) {
+          title = "Falhou";
+          body = emv_error + "\nSegure para tentar de novo";
+        } else {
+          title = emv_brand;
+          body = "PAN " + (emv_pan.length() ? emv_pan : String("(nao lido)")) + "\n"
+               + "AID " + emv_aid_hex + "\n"
+               + emv_auth_method + " - " + emv_risk_label;
+        }
+      } else if (emv_card_present) {
         title = "Lendo...";
         body = "UID " + emv_uid;
-      } else if (!emv_read_ok) {
-        title = "Falhou";
-        body = emv_error + "\nClique para tentar de novo";
       } else {
-        title = emv_brand;
-        body = "PAN " + (emv_pan.length() ? emv_pan : String("(nao lido)")) + "\n"
-             + "AID " + emv_aid_hex + "\n"
-             + emv_auth_method + " - " + emv_risk_label;
+        title = "EMV";
+        body = "Aproxime um cartao\nEMV (leitura somente)";
       }
       d.setTextColor(accent, TFT_BLACK);
       d.setCursor(4, content_top + 2);
@@ -6417,12 +6433,12 @@ void drawScreen(bool popup_only) {
   String emu_id_line;
   if (menu_page == MenuPage::Reader) {
     sub_title_line = "Reader";
-    if (last_card.valid) {
-      title_line = readerTypeLabel(last_card, reader_14b_only);
+    if (reader_display_card.valid) {
+      title_line = readerTypeLabel(reader_display_card, reader_14b_only);
     } else {
       title_line = reader_14b_only ? String("Scan 14B") : String("Scanning");
     }
-    body_line = readerBodyText(last_card);
+    body_line = readerBodyText(reader_display_card);
     if (!reader_14b_only) {
       if (body_line.isEmpty()) body_line = "Mode: AUTO";
       else body_line += "  AUTO";
@@ -6543,13 +6559,13 @@ void drawScreen(bool popup_only) {
     // area for the dossier, give the rest to the card visual - never past
     // the boundary the plain pixel card already respected.
     const int full_h = h - 30;
-    const int dossier_h2 = last_card.valid ? 44 : 0;
+    const int dossier_h2 = reader_display_card.valid ? 44 : 0;
     const int card_h2 = full_h - dossier_h2;
-    drawReaderPixelCard(d, 4, 26, w - 8, card_h2, accent, last_card, reader_14b_only);
-    if (last_card.valid) {
+    drawReaderPixelCard(d, 4, 26, w - 8, card_h2, accent, reader_display_card, reader_14b_only);
+    if (reader_display_card.valid) {
       const int dossier_y = 26 + card_h2;
       d.fillRect(4, dossier_y, w - 8, dossier_h2, TFT_BLACK);
-      const CardProfile* p = cardsDbFind(last_card.protocol);
+      const CardProfile* p = cardsDbFind(reader_display_card.protocol);
       String dossier = p
           ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
           : String("(sem perfil em cards_db)");
@@ -7029,6 +7045,7 @@ void enterCurrentFeature() {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Scanning";
+    reader_display_card.valid = false;  // [FORK] clear sticky result on (re-)entry
     reader_14b_only = false;
     reader_last_hold_log_ms = 0;
     reader_fail_streak = 0;
@@ -7110,6 +7127,7 @@ void enterMenu(MenuPage mode) {
     last_card.protocol = "None";
     last_card.uid = "";
     last_card.detail = "Waiting card...";
+    reader_display_card.valid = false;  // [FORK] clear sticky result on (re-)entry
     reader_14b_only = false;
     reader_last_hold_log_ms = 0;
     reader_fail_streak = 0;
@@ -8470,6 +8488,7 @@ void processReaderResult() {
     last_reader_success_ms = millis();
     if (card.uid != last_card.uid || card.protocol != last_card.protocol || !last_card.valid) {
       last_card = card;
+      reader_display_card = card;  // [FORK] sticky snapshot, see its declaration
       playCardTone(card.protocol);
       drawScreen();
       Serial.println(formatCardLogLine(card));
@@ -8485,6 +8504,11 @@ void processReaderResult() {
     nc.protocol = "None";
     nc.uid = "";
     nc.detail = "No card";
+    // [FORK] last_card resets to "No card" as before - recovery/poll-pacing
+    // logic elsewhere still depends on that. reader_display_card is left
+    // untouched on purpose, so the dossier/pixel-card the person is trying
+    // to read stays up after the card is lifted, until they explicitly ask
+    // for a new one (hold) or leave the page.
     if (last_card.valid || last_card.detail != nc.detail || last_card.protocol != nc.protocol) {
       last_card = nc;
       drawScreen();
@@ -8573,8 +8597,11 @@ void processEmvResult() {
 
   emv_card_present = r.got_card;
   if (!r.got_card) {
-    emv_has_result = false;
-    emv_uid = "";
+    // [FORK] Sticky result: don't clear emv_has_result/emv_* dossier fields
+    // here just because the card left the field - they stay on screen
+    // (same spirit as reader_display_card for the Reader page) until the
+    // user explicitly asks for a new query (hold), or re-enters this page.
+    // Only emv_card_present (above) tracks the live/real-time presence.
     drawScreen();
     return;
   }
@@ -9009,7 +9036,13 @@ void loop() {
 #ifdef APP_TARGET_M5PAPER
       false;
 #else
-      (!in_home && menu_page == MenuPage::Reader && !last_card.valid);
+      // [FORK] Keyed off reader_display_card (the sticky snapshot), not
+      // last_card (the live/real-time one) - otherwise the "waiting for
+      // card" curtain-scan animation would incorrectly re-trigger over a
+      // frozen sticky result the instant the card is lifted, since
+      // last_card.valid flips false right away but reader_display_card is
+      // meant to stay valid until a new query is requested (hold).
+      (!in_home && menu_page == MenuPage::Reader && !reader_display_card.valid);
 #endif
   if (!in_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::ReadNDEF)) {
     const bool anim_running = reader_anim_active;
@@ -9023,14 +9056,14 @@ void loop() {
         const int header_h = 18;
         const int content_top = header_h + 2;
         const int content_h = h - content_top - 2;
-        drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, TFT_GREEN, last_card, reader_14b_only, true);
+        drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, TFT_GREEN, reader_display_card, reader_14b_only, true);
       } else {
-        drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+        drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, reader_display_card, reader_14b_only, true);
       }
 #elif defined(APP_TARGET_ATOMS3)
-      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, reader_display_card, reader_14b_only, true);
 #elif !defined(APP_TARGET_M5PAPER)
-      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, last_card, reader_14b_only, true);
+      drawReaderPixelCard(d, 4, 26, w - 8, h - 30, TFT_GREEN, reader_display_card, reader_14b_only, true);
 #endif
 #endif
     } else {
@@ -9493,16 +9526,48 @@ void loop() {
         drawScreen();
       } else if (menu_page == MenuPage::Diagnose) {
         runDiagnose();
-      } else if (menu_page == MenuPage::EmvReader) {
-        // Force a re-read even if a card is still sitting on the reader.
+      }
+      // [FORK] EmvReader has no click action anymore - a plain click used
+      // to force an immediate re-read, which fought with the sticky result
+      // (the dossier would vanish on the very next click). Hold is now the
+      // one explicit way to request a new query (see hold_is_retry below),
+      // same as the Reader page.
+    }
+    const bool hold_go_home = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
+    // [FORK] On Reader/EmvReader, hold means "new query" instead of "go
+    // home" - the sticky result (reader_display_card / emv_* fields) stays
+    // on screen after the card is lifted, and holding is the explicit way
+    // to request a fresh read. These boards all have a secondary button
+    // (nav_back) for actually leaving to Home from these pages, so this is
+    // safe. AtomS3 has only one physical button, so its hold must stay
+    // "go home" there - it has no secondary button to fall back on, and it
+    // doesn't get the dossier/EMV UI anyway.
+#ifndef APP_TARGET_ATOMS3
+    const bool hold_is_retry =
+        hold_go_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::EmvReader);
+#else
+    const bool hold_is_retry = false;
+#endif
+    if (hold_is_retry) {
+      btn_hold_latched = true;
+      ignore_click_after_hold = true;
+      if (menu_page == MenuPage::Reader) {
+        reader_display_card.valid = false;
+        last_card.valid = false;
+        last_card.protocol = "None";
+        last_card.uid = "";
+        last_card.detail = reader_14b_only ? "14B only" : "Scanning";
+        reader_last_hold_log_ms = 0;
+        reader_fail_streak = 0;
+        reader_need_first_tone = true;
+        last_poll_ms = 0;
+      } else {
         emv_has_result = false;
         emv_error = "";
         nfc_w_emv_retry = true;
-        drawScreen();
       }
-    }
-    const bool hold_go_home = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
-    if (hold_go_home || nav_back) {
+      drawScreen();
+    } else if (hold_go_home || nav_back) {
       if (hold_go_home) {
         btn_hold_latched = true;
         ignore_click_after_hold = true;
