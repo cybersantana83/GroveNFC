@@ -2014,6 +2014,58 @@ bool GroveNFC::type2ReadBlock(uint8_t start_page, uint8_t* out16) {
   return txrx(cmd, sizeof(cmd), out16, out_len, 12) && out_len >= 16;
 }
 
+// [FORK] Full-memory NTAG21x read for the "clone and emulate now" flow.
+// Mirrors readISO14A()'s select + GET_VERSION detection (see the SAK==0x00
+// branch there) instead of reusing it, so this never depends on some other
+// read having left a card selected on the field. Loops type2ReadBlock() 4
+// pages (16 bytes) at a time; the last iteration for each tag size reads
+// past the real last page (NTAG21x tolerates that - returns wrapped/padding
+// bytes), and only the bytes up to the tag's real dump length are copied in.
+bool GroveNFC::readNtagFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len) {
+  dump_len = 0;
+  card.valid = false;
+
+  uint8_t uid_buf[7] = {0};
+  size_t uid_len = 0;
+  if (!selectISO14A(uid_buf, uid_len)) return false;
+
+  writeSysReg(I2cSysReg_SetTxCrcEn_Addr, SYS_REG_TXCRCEN_14A_ENABLE);
+  writeSysReg(I2cSysReg_SetRxCrcEn_Addr, SYS_REG_RXCRCEN_14A_ENABLE);
+  writeMiscReg(I2cMiscReg_SetTxLastBit_Addr, MISC_REG_TXLASTBIT_0);
+
+  uint8_t rx[16] = {0};
+  uint16_t rx_len = sizeof(rx);
+  const uint8_t get_ver[] = {0x60};
+  if (!txrx(get_ver, sizeof(get_ver), rx, rx_len, 15) || rx_len < 8 || rx[2] != 0x04) {
+    // Not an NTAG (wrong ic_type, or GET_VERSION unsupported - plain
+    // Ultralight/NTAG203). Cloning those isn't implemented yet.
+    return false;
+  }
+
+  uint16_t total_pages = 0;
+  const uint8_t storage_sz = rx[6];
+  if (storage_sz == 0x0F) { card.protocol = "NTAG213"; total_pages = 45; }
+  else if (storage_sz == 0x11) { card.protocol = "NTAG215"; total_pages = 135; }
+  else if (storage_sz == 0x13) { card.protocol = "NTAG216"; total_pages = 231; }
+  else return false;
+
+  const size_t needed = static_cast<size_t>(total_pages) * 4;
+  if (needed > dump_capacity) return false;
+
+  for (uint16_t page = 0; page < total_pages; page += 4) {
+    uint8_t block[16];
+    if (!type2ReadBlock(static_cast<uint8_t>(page), block)) return false;
+    const size_t offset = static_cast<size_t>(page) * 4;
+    const size_t copy_n = min(static_cast<size_t>(16), needed - offset);
+    memcpy(dump + offset, block, copy_n);
+  }
+
+  card.uid = bytesToHex(uid_buf, uid_len);
+  card.valid = true;
+  dump_len = needed;
+  return true;
+}
+
 String GroveNFC::parseNdefMessage(const uint8_t* msg, size_t len) {
   String result;
   static const char* uri_prefix[] = {

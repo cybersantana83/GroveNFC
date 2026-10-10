@@ -113,7 +113,7 @@ constexpr uint8_t kEmuActionCount = 2;
 constexpr uint8_t kEmuDumpMaxFiles = 32;
 constexpr size_t kEmuDumpMaxBytes = 4096;
 constexpr size_t kIso15DumpMaxBytes = 256;
-constexpr uint8_t kEmuDumpMenuBaseItems = 2;  // Load Dump + Exit
+constexpr uint8_t kEmuDumpMenuBaseItems = 3;  // Load Dump + Exit + Scan & Clone
 constexpr uint32_t kDumpEmuPopupMs = 1700;
 constexpr const char* kEmuDumpDir = "/dumps";
 constexpr const char* kEmuApSsid = "GroveNFC-Dump";
@@ -1262,6 +1262,7 @@ String dumpDisplayName(const String& path, size_t limit = 18);
 String typeMenuLabel(uint8_t idx) {
   if (idx == 0) return "Load Dump";
   if (idx == 1) return "Exit";
+  if (idx == 2) return "Scan & Clone";
   const uint8_t file_idx = static_cast<uint8_t>(idx - kEmuDumpMenuBaseItems);
   if (file_idx < emu_dump_count) return dumpDisplayName(emu_dump_files[file_idx]);
   return "";
@@ -3782,6 +3783,82 @@ bool loadDumpIntoEmulator(const String& path) {
   if (!applyDumpToCurrentType(path, true, false)) {
     return false;
   }
+  m5paper_emu_hex_offset = 0;
+  emu_switch_apply_pending = false;
+  startCurrentEmulation();
+  return emu_started;
+}
+
+// [FORK] "Scan & Clone" - the Emulator-page menu action that reads a real
+// NTAG213/215/216 card and starts emulating it immediately, entirely in
+// RAM: no JSON/.bin dump file is ever written to LittleFS, so repeated
+// clone-and-emulate cycles can't fill up flash or crash the device the way
+// saved dump files could. Only NTAG213/215/216 are supported so far (the
+// user's explicit "easiest first" choice); other emulator-supported types
+// (Mifare Classic, ISO15693, FeliCa) still require loading a saved dump via
+// "Load Dump" until their own scan paths are added.
+bool quickCloneAndEmulate() {
+  if (!nfc_ready) {
+    emu_dump_status = "NFC not ready";
+    return false;
+  }
+
+  static uint8_t scan_dump[kEmuDumpMaxBytes];
+  size_t dump_len = 0;
+  CardInfo card;
+  bool read_ok = false;
+
+  if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(1500)) == pdTRUE) {
+    read_ok = nfc.readNtagFullDump(card, scan_dump, sizeof(scan_dump), dump_len);
+    xSemaphoreGive(nfc_mutex);
+  }
+
+  if (!read_ok || !card.valid) {
+    emu_dump_status = "No NTAG found";
+    return false;
+  }
+
+  EmuType detected;
+  if (card.protocol == "NTAG213") detected = EmuType::N213;
+  else if (card.protocol == "NTAG215") detected = EmuType::N215;
+  else if (card.protocol == "NTAG216") detected = EmuType::N216;
+  else {
+    emu_dump_status = "Unsupported tag";
+    return false;
+  }
+
+  if (!isEmuTypeSupportedCurrentMode(detected)) {
+    emu_dump_status = "Type unsupported here";
+    return false;
+  }
+
+  DumpTagType dump_type;
+  if (!mapEmuTypeToDumpType(detected, dump_type)) {
+    emu_dump_status = "Type unsupported";
+    return false;
+  }
+
+  bool upload_ok = false;
+  if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(800)) == pdTRUE) {
+    upload_ok = nfc.uploadEmulationDump(dump_type, scan_dump, dump_len);
+    xSemaphoreGive(nfc_mutex);
+  }
+  if (!upload_ok) {
+    emu_dump_status = "Upload failed";
+    return false;
+  }
+
+  emu_type = detected;
+  const uint8_t type_idx = static_cast<uint8_t>(emu_type);
+  // Deliberately not touching emu_dump_restore_checked/loaded_path - there is
+  // no file on disk to auto-restore, this clone lives only in RAM/the NFC
+  // module's buffer for this session.
+  emu_dump_restore_checked[type_idx] = false;
+  emu_dump_loaded_path[type_idx] = "";
+  emu_dump_loaded_uid[type_idx] = card.uid;
+
+  emu_dump_status = "Cloned " + card.protocol + " " + card.uid + " (not saved)";
+
   m5paper_emu_hex_offset = 0;
   emu_switch_apply_pending = false;
   startCurrentEmulation();
@@ -9325,6 +9402,13 @@ void loop() {
           goHome();
           delay(10);
           return;
+        } else if (selected == 2) {
+          // [FORK] "Scan & Clone" - read a live NTAG card and start
+          // emulating it right away, without ever saving a dump file.
+          quickCloneAndEmulate();
+          emu_config_stage = EmuConfigStage::None;
+          emu_show_menu = false;
+          drawScreen();
         } else {
           const uint8_t file_idx = static_cast<uint8_t>(selected - kEmuDumpMenuBaseItems);
           if (file_idx < emu_dump_count) {

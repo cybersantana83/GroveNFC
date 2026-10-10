@@ -132,6 +132,14 @@ class GroveNFC {
   bool readOnlyISO14B(CardInfo& card);
   bool readNdef(String& ndef_text, String& detail);
   bool uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t len);
+  // [FORK] Full-memory read of an NTAG213/215/216 tag for the "clone and
+  // emulate now" flow - see main.cpp's quickCloneAndEmulate(). Does its own
+  // select + GET_VERSION detection (doesn't rely on a prior readAny()'s
+  // selection still being live), then loops type2ReadBlock() to fill the
+  // whole dump. card.protocol is set to "NTAG213"/"NTAG215"/"NTAG216" on
+  // success; fails (returns false) for any other tag type, including plain
+  // Ultralight/NTAG203, which this doesn't attempt to size/clone.
+  bool readNtagFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len);
   const char* deviceName() const;
   uint8_t activeAddress() const { return i2c_addr_; }
 
