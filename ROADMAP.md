@@ -238,9 +238,7 @@ aplicação em vez de por chip.
       (`src/fido2_test.cpp`, ambiente `fido2-test`): `RATS` → `SELECT`
       no applet FIDO (`A0000006472F0001`) → `authenticatorGetInfo`
       (CTAP2, comando `0x04`) sobre o mesmo `sendIBlock()` (WTX +
-      chaining) já validado no EMV. Dump bruto (hex + varredura ASCII),
-      sem parser de CBOR — é validação de alcance/transporte, não um
-      client CTAP2 completo.
+      chaining) já validado no EMV.
       - **Correção importante**: o AID usado para SELECT é
         `A0000006472F0001` (registrado pela FIDO Alliance para
         CTAP/U2F sobre NFC). Uma nota de planejamento anterior deste
@@ -248,13 +246,31 @@ aplicação em vez de por chip.
         da **NDEF Tag Application** (ISO 7816-4 genérico de tags tipo
         4), não tem nada a ver com FIDO. Corrigido antes de qualquer
         hardware real ser testado contra o AID errado.
-      - **Importante (branding)**: isso é uma ferramenta nova, separada
-        do `fido2-nfc-scanner` (Flipper FAP) e da pesquisa Chaos IAM —
-        nenhum tipo, nome ou metadado compartilhado entre os dois
-        projetos.
-      - Ainda não testado contra uma security key FIDO2 real (só a
-        lógica de transporte foi exercitada/revisada) — primeiro teste
-        em hardware fica para quando o `.fap`/firmware for flashado.
+      - **Importante (branding)**: ferramenta separada, em código e em
+        branding, da pesquisa **Chaos IAM** — nenhum tipo, nome ou
+        metadado compartilhado com aquele projeto.
+      - **Atualização — reconhecimento/fingerprinting (não só dump
+        bruto)**: portado o mesmo esquema do `fido2-nfc-scanner`
+        (Flipper FAP, mesmo autor, mesma pesquisa Café com Solda,
+        GPLv3) pra este sketch: `detectVendorString()` casa a string de
+        fabricante (`"YubiKey"`, `"uTrust"`) em qualquer lugar dos
+        bytes crus do ATS (simplificação deliberada — não isola a
+        janela exata dos *historical bytes* do ISO7816, só confirma a
+        presença da string), e `fido2CborParseGetInfo()` é um parser de
+        CBOR mínimo (porte 1:1 de `cbor_parser.c`) que extrai do
+        `authenticatorGetInfo` sem PIN/toque: AAGUID, versões CTAP2,
+        extensions, options (`rk`/`clientPin`/`largeBlobs`/`alwaysUv`/
+        `plat`), `maxMsgSize`, `minPINLength` e firmware version.
+        `printFido2Dossier()` imprime isso nas mesmas quatro seções do
+        app Flipper (`[DEVICE]`/`[SECURITY]`/`[CAPABILITIES]`/
+        `[EXTENSIONS]`) via Serial. Mesma descoberta já divulgada pra
+        Yubico/Identiv/FIDO Alliance (CVE pendente MITRE
+        CAN-2026-2038918): nada disso exige PIN, toque ou qualquer
+        autenticação do token.
+      - Ainda não testado contra uma security key FIDO2 real neste
+        firmware (a lógica de transporte e o parser foram revisados,
+        mas não exercitados em hardware) — primeiro teste fica para
+        quando o `.fap`/firmware for flashado.
 - [x] **Integrar o leitor EMV no firmware principal** — portado de
       `src/emv_test.cpp` pra uma página nova em `main.cpp`
       (`MenuPage::EmvReader`), seguindo o mesmo padrão Core-0/Core-1 do
