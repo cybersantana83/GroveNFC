@@ -415,10 +415,10 @@ void setPcdTimeoutMs(uint16_t ms) {
   mfrc522.PCD_WriteRegister(MFRC522::TReloadRegL, ticks & 0xFF);
 }
 
-void printHex(const char* label, const byte* buf, byte len) {
+void printHex(const char* label, const byte* buf, uint16_t len) {
   Serial.print(label);
   Serial.print(": ");
-  for (byte i = 0; i < len; i++) {
+  for (uint16_t i = 0; i < len; i++) {
     if (buf[i] < 0x10) Serial.print('0');
     Serial.print(buf[i], HEX);
     Serial.print(' ');
@@ -464,7 +464,16 @@ const char* pcbBlockType(byte pcb) {
 
 // Same WTX/chaining handling as emv_test.cpp::sendIBlock() - see that file's
 // comments for the ISO/IEC 14443-4 details (N(R) = i_bn(pcb) ^ 0x01, etc.).
-bool sendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte respCapacity) {
+//
+// [FORK] respLen/respCapacity are uint16_t, not byte: a real YubiKey 5's
+// unauthenticated CTAP2 GetInfo response (long versions/extensions/
+// algorithms lists) runs past 255 bytes once reassembled from I-block
+// chaining, and byte-sized lengths here would both cap the buffer far too
+// low AND silently wrap around 256, corrupting the accumulated response
+// instead of just truncating it. Bug found via a real hardware test
+// against a YubiKey 5C NFC: it hit "Response exceeds buffer capacity" well
+// before the response was actually fully chained in.
+bool sendIBlock(byte* apdu, byte apduLen, byte* respOut, uint16_t& respLen, uint16_t respCapacity) {
   byte frame[64];
   frame[0] = 0x02;
   memcpy(frame + 1, apdu, apduLen);
@@ -494,7 +503,7 @@ bool sendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte res
     }
 
     if ((pcb & 0xC0) == 0x00) {
-      byte chunkLen = backLen - 3;  // PCB(1) + trailing CRC_A(2)
+      uint16_t chunkLen = (uint16_t)backLen - 3;  // PCB(1) + trailing CRC_A(2)
       if (respLen + chunkLen > respCapacity) {
         Serial.println("[FIDO2] Response exceeds buffer capacity, aborting");
         return false;
@@ -532,16 +541,25 @@ bool sendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte res
 // smartcard APDU chaining, not ISO14443-4 chaining (that's handled inside
 // sendIBlock() already, one level below this).
 void tryGetInfo() {
+  // [FORK] Sized for a real YubiKey 5 CTAP2 GetInfo response, which was
+  // found (on real hardware) to run past the 200/400-byte buffers this
+  // sketch started with: a long versions/extensions/algorithms list adds
+  // up to 300+ bytes of CBOR before the trailing SW. 512 is the same
+  // headroom fido2-nfc-scanner's FIDO2_MAX_RESPONSE uses; the extra margin
+  // here covers the GET RESPONSE chaining trailer bytes.
+  constexpr uint16_t kRespCapacity = 512;
+  constexpr uint16_t kFullCapacity = 600;
+
   byte getInfo[] = {0x80, 0x10, 0x80, 0x00, 0x01, 0x04, 0x00};
-  byte resp[200];
-  byte respLen = 0;
-  if (!sendIBlock(getInfo, sizeof(getInfo), resp, respLen, sizeof(resp))) {
+  byte resp[kRespCapacity];
+  uint16_t respLen = 0;
+  if (!sendIBlock(getInfo, sizeof(getInfo), resp, respLen, kRespCapacity)) {
     Serial.println("[FIDO2] authenticatorGetInfo: no response");
     return;
   }
 
-  byte full[400];
-  byte fullLen = 0;
+  byte full[kFullCapacity];
+  uint16_t fullLen = 0;
   memcpy(full, resp, respLen);
   fullLen = respLen;
 
@@ -549,13 +567,13 @@ void tryGetInfo() {
     byte more = full[fullLen - 1];
     fullLen -= 2;  // drop the 61 XX trailer, it's not response payload
     byte getResp[] = {0x00, 0xC0, 0x00, 0x00, more};
-    byte chunk[200];
-    byte chunkLen = 0;
-    if (!sendIBlock(getResp, sizeof(getResp), chunk, chunkLen, sizeof(chunk))) {
+    byte chunk[kRespCapacity];
+    uint16_t chunkLen = 0;
+    if (!sendIBlock(getResp, sizeof(getResp), chunk, chunkLen, kRespCapacity)) {
       Serial.println("[FIDO2] GET RESPONSE failed mid-chain");
       return;
     }
-    if (fullLen + chunkLen > sizeof(full)) {
+    if (fullLen + chunkLen > kFullCapacity) {
       Serial.println("[FIDO2] GetInfo response too large for buffer");
       return;
     }
@@ -576,7 +594,7 @@ void tryGetInfo() {
   }
 
   // Payload is [CTAP2 status byte][CBOR map]. Status 0x00 = success.
-  byte dataLen = fullLen - 2;
+  uint16_t dataLen = fullLen - 2;
   if (dataLen < 1) {
     Serial.println("[FIDO2] GetInfo: empty payload");
     return;
@@ -598,7 +616,7 @@ void tryGetInfo() {
   if (!fido2CborParseGetInfo(full + 1, dataLen - 1, g_fp)) {
     Serial.println("[FIDO2] CBOR parse failed - falling back to ASCII scan");
     Serial.print("[FIDO2] ASCII scan: ");
-    for (byte i = 1; i < dataLen; i++) {
+    for (uint16_t i = 1; i < dataLen; i++) {
       char c = (char)full[i];
       Serial.print((c >= 0x20 && c < 0x7F) ? c : '.');
     }
@@ -624,7 +642,7 @@ void trySelectFido() {
   byte cmdLen = 6 + sizeof(kFidoAid);
 
   byte resp[64];
-  byte respLen = 0;
+  uint16_t respLen = 0;
   if (!sendIBlock(selectFido, cmdLen, resp, respLen, sizeof(resp))) {
     Serial.println("[FIDO2] SELECT (FIDO AID) failed - not a FIDO2/U2F authenticator?");
     return;
