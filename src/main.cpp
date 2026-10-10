@@ -147,7 +147,6 @@ enum class MenuPage : uint8_t {
   Emulator,
   WebFiles,
   Diagnose,
-  Piano,
   About,
   // [FORK] EMV dossier reader (RATS -> PPSE -> SELECT AID -> GPO), WS1850S
   // only - see readWs1850sCard()/nfc_ws1850s_active. Only reachable on
@@ -184,19 +183,6 @@ enum class DumpsStage : uint8_t {
   PortalQr,
 };
 
-enum class PianoStage : uint8_t {
-  Menu = 0,
-  Play,
-  Config,
-};
-
-constexpr uint8_t kPianoNoteCount = 8;
-constexpr uint16_t kPianoFreq[kPianoNoteCount] = {523, 587, 659, 698, 784, 880, 988, 1047};
-constexpr const char* kPianoNoteName[kPianoNoteCount] = {"1 Do", "2 Re", "3 Mi", "4 Fa", "5 Sol", "6 La", "7 Ti", "1' Do"};
-constexpr uint32_t kPianoPollMs = 140;
-constexpr uint16_t kPianoSustainToneMs = 170;
-constexpr uint16_t kPianoSustainRetriggerMs = 110;
-constexpr const char* kPianoPrefNs = "piano";
 
 GroveNFC nfc(Wire);
 bool nfc_ws1850s_active = false;  // [FORK] declared for all boards; only set true on StickS3
@@ -383,16 +369,7 @@ Preferences prefs;
 bool emu_dump_restore_checked[static_cast<uint8_t>(EmuType::Count)] = {false};
 String emu_dump_loaded_path[static_cast<uint8_t>(EmuType::Count)];
 String emu_dump_loaded_uid[static_cast<uint8_t>(EmuType::Count)];
-PianoStage piano_stage = PianoStage::Menu;
-uint8_t piano_menu_index = 0;
-uint8_t piano_config_step = 0;
-String piano_card_map[kPianoNoteCount];
-String piano_status = "Not configured";
-String piano_last_note = "-";
 int8_t about_page_idx = 0;
-String piano_active_card_key;
-int8_t piano_active_note_idx = -1;
-uint32_t piano_last_sustain_ms = 0;
 
 // [FORK] UI-thread mirror of the latest NfcEmvResult, updated by
 // processEmvResult(). Drawn by the MenuPage::EmvReader branch in drawScreen().
@@ -461,13 +438,6 @@ struct NfcNdefResult {
   bool new_result = false;
 };
 NfcNdefResult nfc_ndef_result;
-
-struct NfcPianoResult {
-  CardInfo card;
-  bool got_card = false;
-  bool new_result = false;
-};
-NfcPianoResult nfc_piano_result;
 
 // [FORK] Result of one EMV dossier attempt (RATS -> SELECT PPSE -> SELECT AID
 // -> GPO), filled by the worker and consumed by processEmvResult(). Mirrors
@@ -544,7 +514,6 @@ NfcCmdResult nfc_cmd_result;
 bool nfc_w_reader_14b_only = false;
 bool nfc_w_is_reader_page = false;
 bool nfc_w_is_ndef_page = false;
-bool nfc_w_is_piano_page = false;
 bool nfc_w_is_emv_page = false;
 bool nfc_w_emv_retry = false;  // UI -> worker: force a re-read of the card already on the reader
 bool nfc_w_is_fido2_page = false;
@@ -553,7 +522,6 @@ bool nfc_w_card_valid = false;
 bool nfc_w_wifi_popup = false;
 bool nfc_w_in_home = true;
 EmuType nfc_w_emu_type = EmuType::N213;
-PianoStage nfc_w_piano_stage = PianoStage::Menu;
 
 inline bool mainButtonClicked() {
 #ifdef APP_TARGET_M5PAPER
@@ -822,11 +790,11 @@ static void setSpeaker5V(bool enable) {
 // kHomeOrderNfcUnit (ST25R3916 / "M5 Unit NFC") never gets it - that chip
 // doesn't do ISO14443-4 APDUs the way this reader needs.
 #if defined(APP_TARGET_STICKS3)
-const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::EmvReader, MenuPage::Fido2, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::EmvReader, MenuPage::Fido2, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::About};
 #else
-const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::About};
 #endif
-const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::About};
 // Keep the same accent palette for both GroveNFC and Unit NFC to avoid UI mismatch.
 
 inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
@@ -854,7 +822,6 @@ const char* homePageName(MenuPage page) {
     case MenuPage::ReadNDEF: return "Read NDEF";
     case MenuPage::Emulator: return "Emulator";
     case MenuPage::WebFiles: return "Dumps";
-    case MenuPage::Piano:    return "Piano";
     case MenuPage::About:    return "About";
     case MenuPage::Diagnose: return "Diagnose";
     case MenuPage::EmvReader: return "EMV";
@@ -888,13 +855,6 @@ void drawHomeIconForPage(lgfx::v1::LGFXBase& d, int cx, int cy, MenuPage page, u
     drawHomeIconDumps(d, cx, cy, accent);
   } else if (page == MenuPage::Emulator) {
     drawHomeIconEmulator(d, cx, cy, accent);
-  } else if (page == MenuPage::Piano) {
-    d.fillRect(cx - 18, cy - 18, 36, 30, accent);
-    d.fillRect(cx - 14, cy - 14, 28, 22, TFT_BLACK);
-    d.fillRect(cx - 10, cy - 10, 3, 18, accent);
-    d.fillRect(cx - 4, cy - 10, 3, 18, accent);
-    d.fillRect(cx + 2, cy - 10, 3, 18, accent);
-    d.fillRect(cx + 8, cy - 10, 3, 18, accent);
   } else if (page == MenuPage::EmvReader) {
     // Simple credit-card-with-chip glyph.
     d.fillRect(cx - 18, cy - 13, 36, 26, accent);
@@ -922,8 +882,6 @@ const char* pageName(MenuPage page) {
       return "Diagnose";
     case MenuPage::ReadNDEF:
       return "Read NDEF";
-    case MenuPage::Piano:
-      return "Piano";
     case MenuPage::About:
       return "About";
     case MenuPage::EmvReader:
@@ -1213,25 +1171,6 @@ static bool handleM5PaperFeatureTouch() {
       drawScreen();
     }
     return true;
-  } else if (menu_page == MenuPage::Piano) {
-    if (piano_stage == PianoStage::Menu) {
-      if (m5PaperHit(touch, 24, 260, w - 48, 110)) {
-        setSpeaker5V(true);
-        piano_stage = PianoStage::Play;
-        piano_last_note = "-";
-        piano_status = "Place a mapped card to play";
-        drawScreen();
-        return true;
-      }
-      if (m5PaperHit(touch, 24, 400, w - 48, 110)) {
-        piano_stage = PianoStage::Config;
-        piano_config_step = 0;
-        for (uint8_t i = 0; i < kPianoNoteCount; ++i) piano_card_map[i] = "";
-        piano_status = String("Scan ") + kPianoNoteName[0];
-        drawScreen();
-        return true;
-      }
-    }
   }
   return false;
 }
@@ -1358,13 +1297,6 @@ bool sendNfcCmdAndWait(NfcCmd cmd, uint32_t timeout_ms = 2000);
 void goHome();
 void enterCurrentFeature();
 void runDiagnose();
-void handlePiano();
-void loadPianoConfig();
-void savePianoConfig();
-uint8_t pianoMappedCount();
-int8_t findPianoNoteByCard(const String& card_key);
-String buildPianoCardKey(const grove_nfc::CardInfo& card);
-void drawPianoPlayPartial();
 
 const char* protocolFull(const String& protocol) {
   if (protocol == "ISO14443A") return "ISO14443A";
@@ -1553,58 +1485,6 @@ String formatCardLogLine(const grove_nfc::CardInfo& card) {
     line += " | " + detail;
   }
   return line;
-}
-
-uint8_t pianoMappedCount() {
-  uint8_t count = 0;
-  for (uint8_t i = 0; i < kPianoNoteCount; ++i) {
-    if (!piano_card_map[i].isEmpty()) ++count;
-  }
-  return count;
-}
-
-int8_t findPianoNoteByCard(const String& card_key) {
-  if (card_key.isEmpty()) return -1;
-  for (uint8_t i = 0; i < kPianoNoteCount; ++i) {
-    if (piano_card_map[i] == card_key) return static_cast<int8_t>(i);
-  }
-  return -1;
-}
-
-String buildPianoCardKey(const grove_nfc::CardInfo& card) {
-  if (!card.valid) return "";
-  String uid = card.uid;
-  uid.toUpperCase();
-  uid.replace(":", "");
-  return card.protocol + "|" + uid;
-}
-
-void loadPianoConfig() {
-  if (!prefs.begin(kPianoPrefNs, true)) {
-    piano_status = "Config load fail";
-    return;
-  }
-  for (uint8_t i = 0; i < kPianoNoteCount; ++i) {
-    String key = "n" + String(i);
-    piano_card_map[i] = prefs.getString(key.c_str(), "");
-  }
-  prefs.end();
-
-  const uint8_t mapped = pianoMappedCount();
-  if (mapped == kPianoNoteCount) piano_status = "Configured 8/8";
-  else piano_status = "Configured " + String(mapped) + "/8";
-}
-
-void savePianoConfig() {
-  if (!prefs.begin(kPianoPrefNs, false)) {
-    piano_status = "Config save fail";
-    return;
-  }
-  for (uint8_t i = 0; i < kPianoNoteCount; ++i) {
-    String key = "n" + String(i);
-    prefs.putString(key.c_str(), piano_card_map[i]);
-  }
-  prefs.end();
 }
 
 bool isDumpFilePath(const String& path) {
@@ -4668,185 +4548,6 @@ void drawReaderPixelCard(lgfx::v1::LGFXBase& d,
   d.endWrite();
 }
 
-void drawPianoKeyboard(lgfx::v1::LGFXBase& d,
-                       int x,
-                       int y,
-                       int width,
-                       int height,
-                       int8_t active_note,
-                       uint16_t accent) {
-  if (width < 80 || height < 30) return;
-
-  d.fillRect(x, y, width, height, TFT_BLACK);
-  d.drawRect(x, y, width, height, accent);
-
-  const int white_count = kPianoNoteCount;
-  const int white_w = width / white_count;
-  const int white_h = height - 2;
-  const uint16_t active_color = scaleColor565(accent, 220);
-
-  for (int i = 0; i < white_count; ++i) {
-    const int key_x = x + i * white_w;
-    const bool active = (active_note == i);
-    d.fillRect(key_x + 1, y + 1, white_w - 1, white_h, active ? active_color : TFT_WHITE);
-    d.drawRect(key_x, y, white_w, height, TFT_BLACK);
-  }
-
-  static const uint8_t black_after[] = {0, 1, 3, 4, 5};
-  const int black_w = max(4, white_w / 2);
-  const int black_h = (height * 58) / 100;
-
-  for (uint8_t i = 0; i < sizeof(black_after); ++i) {
-    const int left_idx = black_after[i];
-    const int bx = x + (left_idx + 1) * white_w - black_w / 2;
-    d.fillRect(bx, y + 1, black_w, black_h, TFT_BLACK);
-    d.drawRect(bx, y + 1, black_w, black_h, TFT_DARKGREY);
-  }
-}
-
-bool getPianoPlayLayout(int& note_x,
-                        int& note_y,
-                        int& note_w,
-                        int& note_h,
-                        int& key_x,
-                        int& key_y,
-                        int& key_w,
-                        int& key_h) {
-#ifdef APP_TARGET_M5PAPER
-  auto& d = g_canvas;
-#else
-  auto& d = M5.Display;
-#endif
-  const int w = d.width();
-  const int h = d.height();
-
-#if defined(APP_TARGET_STICKS3) || defined(APP_TARGET_STICKCPLUS) || defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
-  if (w > h) {
-    const int header_h = 18;
-    const int content_top = header_h + 2;
-    const int content_h = h - content_top - 2;
-    note_x = 4;
-    note_y = content_top + 20;
-    note_w = w - 8;
-    note_h = 16;
-    key_x = 4;
-    key_y = content_top + 38;
-    key_w = w - 8;
-    key_h = max(18, content_h - 44);
-    return true;
-  }
-#endif
-
-  const int body_y = 54;
-  note_x = 4;
-  note_y = body_y;
-  note_w = w - 8;
-  note_h = 18;
-  key_x = 4;
-  key_y = body_y + 20;
-  key_w = w - 8;
-  key_h = h - (body_y + 24);
-  return true;
-}
-
-void drawPianoBlackKeys(lgfx::v1::LGFXBase& d, int x, int y, int width, int height) {
-  const int white_w = width / kPianoNoteCount;
-  static const uint8_t black_after[] = {0, 1, 3, 4, 5};
-  const int black_w = max(4, white_w / 2);
-  const int black_h = (height * 58) / 100;
-
-  for (uint8_t i = 0; i < sizeof(black_after); ++i) {
-    const int left_idx = black_after[i];
-    const int bx = x + (left_idx + 1) * white_w - black_w / 2;
-    d.fillRect(bx, y + 1, black_w, black_h, TFT_BLACK);
-    d.drawRect(bx, y + 1, black_w, black_h, TFT_DARKGREY);
-  }
-}
-
-void drawPianoWhiteKey(lgfx::v1::LGFXBase& d,
-                       int key_x,
-                       int key_y,
-                       int key_w,
-                       int key_h,
-                       int key_idx,
-                       bool active,
-                       uint16_t accent) {
-  if (key_idx < 0 || key_idx >= static_cast<int>(kPianoNoteCount)) return;
-  const int white_w = key_w / kPianoNoteCount;
-  const int x = key_x + key_idx * white_w;
-  const uint16_t active_color = scaleColor565(accent, 220);
-  d.fillRect(x + 1, key_y + 1, white_w - 1, key_h - 2, active ? active_color : TFT_WHITE);
-  d.drawRect(x, key_y, white_w, key_h, TFT_BLACK);
-}
-
-void drawPianoPlayDiff(int8_t old_note, int8_t new_note, bool update_note_text) {
-  if (in_home || menu_page != MenuPage::Piano || piano_stage != PianoStage::Play) return;
-#ifdef APP_TARGET_M5PAPER
-  constexpr int partial_x = 24;
-  constexpr int partial_y = 380;
-  const int partial_w = g_canvas.width() - 48;
-  constexpr int partial_h = 300;
-  drawPianoKeyboard(g_canvas, partial_x, partial_y, partial_w, partial_h, new_note, TFT_BLACK);
-  drawPianoKeyboard(M5.Display, partial_x, partial_y, partial_w, partial_h, new_note, TFT_BLACK);
-  M5.Display.display(partial_x, partial_y, partial_w, partial_h);
-  return;
-#endif
-
-  int note_x = 0, note_y = 0, note_w = 0, note_h = 0;
-  int key_x = 0, key_y = 0, key_w = 0, key_h = 0;
-  if (!getPianoPlayLayout(note_x, note_y, note_w, note_h, key_x, key_y, key_w, key_h)) return;
-
-  if (key_w < 80 || key_h < 30) {
-    drawPianoPlayPartial();
-    return;
-  }
-
-  auto& d =
-#ifdef APP_TARGET_M5PAPER
-    g_canvas;
-#else
-    M5.Display;
-#endif
-  const uint16_t accent = TFT_MAGENTA;
-  d.setFont(&fonts::Font0);
-  d.setTextSize(2);
-
-  if (update_note_text) {
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.fillRect(note_x, note_y, note_w, note_h, TFT_BLACK);
-    d.setCursor(note_x, note_y);
-    d.print("Note: " + piano_last_note);
-  }
-
-  if (old_note != new_note) {
-    drawPianoWhiteKey(d, key_x, key_y, key_w, key_h, old_note, false, accent);
-    drawPianoWhiteKey(d, key_x, key_y, key_w, key_h, new_note, true, accent);
-    drawPianoBlackKeys(d, key_x, key_y, key_w, key_h);
-  }
-}
-
-void drawPianoPlayPartial() {
-  if (in_home || menu_page != MenuPage::Piano || piano_stage != PianoStage::Play) return;
-
-  auto& d =
-#ifdef APP_TARGET_M5PAPER
-    g_canvas;
-#else
-    M5.Display;
-#endif
-  int note_x = 0, note_y = 0, note_w = 0, note_h = 0;
-  int key_x = 0, key_y = 0, key_w = 0, key_h = 0;
-  getPianoPlayLayout(note_x, note_y, note_w, note_h, key_x, key_y, key_w, key_h);
-  const uint16_t accent = TFT_MAGENTA;
-
-  d.setFont(&fonts::Font0);
-  d.setTextSize(2);
-  d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.fillRect(note_x, note_y, note_w, note_h, TFT_BLACK);
-  d.setCursor(note_x, note_y);
-  d.print("Note: " + piano_last_note);
-  drawPianoKeyboard(d, key_x, key_y, key_w, key_h, piano_active_note_idx, accent);
-}
 
 EmuType emuTypeWithOffset(EmuType base, int8_t offset) {
   const int count = static_cast<int>(EmuType::Count);
@@ -5101,17 +4802,6 @@ static void drawM5PaperHomeIcon(int cx, int cy, MenuPage page, uint16_t color) {
     g_canvas.drawRoundRect(cx - 22, cy - 16, 44, 30, 4, color);
     g_canvas.drawArc(cx - 2, cy - 1, 7, 5, 300, 60, color);
     g_canvas.drawArc(cx - 2, cy - 1, 12, 10, 300, 60, color);
-  } else if (page == MenuPage::Piano) {
-    g_canvas.drawRoundRect(cx - 32, cy - 24, 64, 48, 5, color);
-    for (int i = 1; i < 8; ++i) {
-      const int x = cx - 32 + i * 8;
-      g_canvas.drawLine(x, cy - 23, x, cy + 23, color);
-    }
-    static const uint8_t black_after[] = {1, 2, 4, 5, 6};
-    for (uint8_t i : black_after) {
-      const int x = cx - 32 + i * 8 - 2;
-      g_canvas.fillRect(x, cy - 23, 5, 24, color);
-    }
   } else {
     drawHomeIconForPage(g_canvas, cx, cy, page, color);
   }
@@ -5530,38 +5220,6 @@ static void drawM5PaperDumpPreviewPage() {
   g_canvas.print("Tap table for next page");
 }
 
-static void drawM5PaperPianoPage() {
-  const int w = g_canvas.width();
-  g_canvas.fillScreen(TFT_WHITE);
-  drawM5PaperPageTitle("NFC PIANO", String("MAPPED CARDS: ") + pianoMappedCount() + "/8");
-  g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
-  if (piano_stage == PianoStage::Menu) {
-    drawM5PaperButton(24, 260, w - 48, 110, "PLAY", true);
-    drawM5PaperButton(24, 400, w - 48, 110, "CONFIGURE 8 CARDS");
-    g_canvas.setTextSize(2);
-    drawWrappedText(g_canvas, 36, 570, w - 72, 32, 5, 20,
-                    "Map eight NFC cards to musical notes, then tap PLAY and present a card to sound its note.",
-                    TFT_BLACK, TFT_WHITE);
-  } else {
-    g_canvas.setTextSize(3);
-    const String note = piano_stage == PianoStage::Config ? String(kPianoNoteName[piano_config_step]) : piano_last_note;
-    const int note_w = g_canvas.textWidth(note);
-    g_canvas.setCursor((w - note_w) / 2, 210);
-    g_canvas.print(note);
-    g_canvas.setTextSize(2);
-    const int status_w = g_canvas.textWidth(piano_status);
-    g_canvas.setCursor(max(20, (w - status_w) / 2), 270);
-    g_canvas.print(piano_status);
-    drawPianoKeyboard(g_canvas, 24, 380, w - 48, 300, piano_active_note_idx, TFT_BLACK);
-    g_canvas.setTextSize(2);
-    drawWrappedText(g_canvas, 32, 730, w - 64, 32, 4, 20,
-                    piano_stage == PianoStage::Config
-                        ? "Present one card for each requested note. Configuration saves after all eight cards."
-                        : "Present a configured card to play. Tap Back to leave piano mode.",
-                    TFT_BLACK, TFT_WHITE);
-  }
-}
-
 static void drawM5PaperAboutPage() {
   const int w = g_canvas.width();
   g_canvas.fillScreen(TFT_WHITE);
@@ -5604,7 +5262,6 @@ void drawScreen(bool popup_only) {
   if (menu_page == MenuPage::Emulator) accent = TFT_ORANGE;
   if (menu_page == MenuPage::WebFiles) accent = TFT_CYAN;
   if (menu_page == MenuPage::Diagnose) accent = TFT_YELLOW;
-  if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
   if (menu_page == MenuPage::About) accent = TFT_CYAN;
   if (menu_page == MenuPage::EmvReader) accent = TFT_YELLOW;
   if (menu_page == MenuPage::Fido2) accent = TFT_BLUE;
@@ -5624,11 +5281,6 @@ void drawScreen(bool popup_only) {
   if (!in_home && menu_page == MenuPage::WebFiles) {
     if (dumps_stage == DumpsStage::Preview) drawM5PaperDumpPreviewPage();
     else drawM5PaperDumpsPage();
-    pushCanvasToEink();
-    return;
-  }
-  if (!in_home && menu_page == MenuPage::Piano) {
-    drawM5PaperPianoPage();
     pushCanvasToEink();
     return;
   }
@@ -5892,7 +5544,6 @@ void drawScreen(bool popup_only) {
     else if (menu_page == MenuPage::ReadNDEF) page_title = "Read NDEF";
     else if (menu_page == MenuPage::Emulator) page_title = "Emulator";
     else if (menu_page == MenuPage::WebFiles) page_title = "Dumps";
-    else if (menu_page == MenuPage::Piano) page_title = "Piano";
     else if (menu_page == MenuPage::About) page_title = "About";
     else if (menu_page == MenuPage::EmvReader) page_title = "EMV";
     else if (menu_page == MenuPage::Fido2) page_title = "FIDO2";
@@ -6158,34 +5809,6 @@ void drawScreen(bool popup_only) {
           grove_id_col = emu_started ? (uint16_t)TFT_GREEN : (uint16_t)TFT_WHITE;
           drawEmuBottomLine(d, gex, uid_y, gew, grove_id_text, grove_id_col);
         }
-      }
-    } else if (menu_page == MenuPage::Piano) {
-      d.setTextColor(accent, TFT_BLACK);
-      d.setCursor(4, content_top + 2);
-      d.print(piano_stage == PianoStage::Play ? "Play" : (piano_stage == PianoStage::Config ? "Scan" : "Menu"));
-      d.setTextColor(TFT_WHITE, TFT_BLACK);
-      if (piano_stage == PianoStage::Menu) {
-        d.setCursor(4, content_top + 20);
-        d.print(piano_menu_index == 0 ? "> Play" : "  Play");
-        d.setCursor(4, content_top + 38);
-        d.print(piano_menu_index == 1 ? "> Config" : "  Config");
-        d.setCursor(4, content_top + 56);
-        d.print(piano_menu_index == 2 ? "> Exit" : "  Exit");
-      } else if (piano_stage == PianoStage::Config) {
-        d.setCursor(4, content_top + 20);
-        d.printf("Scan %s", kPianoNoteName[piano_config_step]);
-        d.setCursor(4, content_top + 38);
-        d.print(piano_status);
-      } else {
-        d.setCursor(4, content_top + 20);
-        d.print("Note: " + piano_last_note);
-        drawPianoKeyboard(d,
-                          4,
-                          content_top + 38,
-                          w - 8,
-                          max(18, content_h - 44),
-                          piano_active_note_idx,
-                          accent);
       }
     } else if (menu_page == MenuPage::About) {
       if (about_page_idx == 1) {
@@ -6582,20 +6205,6 @@ void drawScreen(bool popup_only) {
   } else if (menu_page == MenuPage::About) {
     sub_title_line = "About";
     title_line = "GroveNFC";
-  } else if (menu_page == MenuPage::Piano) {
-    sub_title_line = "Piano";
-    if (piano_stage == PianoStage::Menu) {
-      title_line = "Select";
-      body_line = String(piano_menu_index == 0 ? ">" : " ") + "Play  " +
-                  String(piano_menu_index == 1 ? ">" : " ") + "Config  " +
-                  String(piano_menu_index == 2 ? ">" : " ") + "Exit";
-    } else if (piano_stage == PianoStage::Config) {
-      title_line = String("Scan ") + String(piano_config_step + 1) + "/8";
-      body_line = String("Scan ") + kPianoNoteName[piano_config_step] + " | " + piano_status;
-    } else {
-      title_line = "Play";
-      body_line = "Note " + piano_last_note + " | " + piano_status;
-    }
   } else {
     sub_title_line = "Diagnose";
     title_line = diagnose_ok ? "DIAG PASS" : "DIAG CHECK";
@@ -6763,13 +6372,6 @@ void drawScreen(bool popup_only) {
     for (int i = 0; i < visible && start + i < report_count; ++i) {
       drawWrappedText(d, 4, 76 + i * 16, w - 8, 14, 1, 8, report_lines[start + i], TFT_WHITE, TFT_BLACK);
     }
-  } else if (menu_page == MenuPage::Piano && piano_stage == PianoStage::Play) {
-    d.setFont(&fonts::Font0);
-    d.setTextSize(2);
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(4, body_y);
-    d.print("Note: " + piano_last_note);
-    drawPianoKeyboard(d, 4, body_y + 20, w - 8, h - (body_y + 24), piano_active_note_idx, accent);
   } else {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
@@ -7185,15 +6787,6 @@ void enterCurrentFeature() {
   } else if (menu_page == MenuPage::Diagnose) {
     runDiagnose();
     return;
-  } else if (menu_page == MenuPage::Piano) {
-    piano_stage = PianoStage::Menu;
-    piano_menu_index = 0;
-    piano_active_card_key = "";
-    piano_active_note_idx = -1;
-    piano_last_sustain_ms = 0;
-    piano_last_note = "-";
-    const uint8_t mapped = pianoMappedCount();
-    piano_status = "Configured " + String(mapped) + "/8";
   } else if (menu_page == MenuPage::EmvReader) {
     emv_card_present = false;
     emv_has_result = false;
@@ -7292,15 +6885,6 @@ void enterMenu(MenuPage mode) {
     emu_menu_type = emu_type;
     emu_menu_index = 1;
     emu_show_menu = false;
-  } else if (menu_page == MenuPage::Piano) {
-    piano_stage = PianoStage::Menu;
-    piano_menu_index = 0;
-    piano_active_card_key = "";
-    piano_active_note_idx = -1;
-    piano_last_sustain_ms = 0;
-    piano_last_note = "-";
-    const uint8_t mapped = pianoMappedCount();
-    piano_status = "Configured " + String(mapped) + "/8";
   } else {
     emu_config_stage = EmuConfigStage::None;
     emu_show_menu = false;
@@ -8531,90 +8115,6 @@ void handleReader() {
   }
 }
 
-void handlePiano() {
-  if (!nfc_ready) return;
-  if (piano_stage == PianoStage::Menu) return;
-
-  const uint32_t now = millis();
-  if (now - last_poll_ms < kPianoPollMs) return;
-  last_poll_ms = now;
-
-  CardInfo card;
-  if (!nfc.readAny(card)) {
-    const int8_t old_note = piano_active_note_idx;
-    piano_active_card_key = "";
-    piano_active_note_idx = -1;
-    piano_last_sustain_ms = 0;
-    if (piano_stage == PianoStage::Play) {
-      piano_last_note = "-";
-      piano_status = "Tap card to play";
-      drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-    }
-    return;
-  }
-
-  const String card_key = buildPianoCardKey(card);
-  if (card_key.isEmpty()) return;
-
-  if (piano_stage == PianoStage::Config) {
-    if (card_key == piano_active_card_key) return;
-    piano_active_card_key = card_key;
-
-    for (uint8_t i = 0; i < piano_config_step; ++i) {
-      if (piano_card_map[i] == card_key) {
-        piano_status = "Card already used";
-        drawScreen();
-        return;
-      }
-    }
-
-    piano_card_map[piano_config_step] = card_key;
-    playTone(kPianoFreq[piano_config_step], 120);
-    piano_last_note = kPianoNoteName[piano_config_step];
-    ++piano_config_step;
-
-    if (piano_config_step >= kPianoNoteCount) {
-      savePianoConfig();
-      piano_stage = PianoStage::Menu;
-      piano_menu_index = 0;
-      piano_status = "Config saved 8/8";
-    } else {
-      piano_status = String("Saved ") + String(piano_config_step) + "/8";
-    }
-    drawScreen();
-    return;
-  }
-
-  const int8_t note_idx = findPianoNoteByCard(card_key);
-  const bool same_card = (card_key == piano_active_card_key);
-  piano_active_card_key = card_key;
-
-  if (note_idx < 0) {
-    const int8_t old_note = piano_active_note_idx;
-    piano_last_note = "-";
-    piano_active_note_idx = -1;
-    piano_status = "Card not mapped";
-    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-    return;
-  }
-
-  const int8_t old_note = piano_active_note_idx;
-  const bool new_note = (note_idx != piano_active_note_idx);
-  const bool need_retrigger = !same_card || new_note || (now - piano_last_sustain_ms >= kPianoSustainRetriggerMs);
-  if (need_retrigger) {
-    playTone(kPianoFreq[note_idx], kPianoSustainToneMs);
-    piano_last_sustain_ms = now;
-  }
-
-  const bool note_changed = (piano_active_note_idx != note_idx) || (piano_last_note != kPianoNoteName[note_idx]);
-  piano_active_note_idx = note_idx;
-  piano_last_note = kPianoNoteName[note_idx];
-  piano_status = "Play " + String(kPianoNoteName[note_idx]);
-  if (note_changed) {
-    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-  }
-}
-
 // ---- NFC Worker Task (runs on Core 0) ----
 // All I2C/NFC blocking calls happen here. Results are written to
 // shared result structs and consumed by the UI loop on Core 1.
@@ -8623,7 +8123,6 @@ void nfcWorkerTask(void* /*param*/) {
   uint32_t w_last_health_ms = 0;
   uint32_t w_last_reconnect_ms = 0;
   uint32_t w_last_ndef_ms = 0;
-  uint32_t w_last_piano_ms = 0;
   uint32_t w_last_reader_success_ms = millis();
   uint32_t w_last_recover_ms = 0;
   uint8_t w_reader_fail_streak = 0;
@@ -9007,23 +8506,6 @@ void nfcWorkerTask(void* /*param*/) {
       }
     }
 
-    // --- handlePiano (periodic card poll for piano) ---
-    if (nfc_ready && !w_in_home && nfc_w_is_piano_page && nfc_w_piano_stage != PianoStage::Menu) {
-      if (now - w_last_piano_ms >= kPianoPollMs) {
-        w_last_piano_ms = now;
-        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-          CardInfo card;
-          bool got = nfc.readAny(card);
-          NfcPianoResult pr;
-          pr.card = card;
-          pr.got_card = got;
-          pr.new_result = true;
-          nfc_piano_result = pr;
-          xSemaphoreGive(nfc_mutex);
-        }
-      }
-    }
-
     // --- Unit NFC emulation state machine update ---
     // emu_a.update() must be called continuously while emulating.
     // This section runs every task tick (5ms) regardless of current page.
@@ -9245,90 +8727,6 @@ void processFido2Result() {
   drawScreen();
 }
 
-// UI-side: process piano result from NFC worker
-void processPianoResult() {
-  if (!nfc_piano_result.new_result) return;
-  CardInfo card = nfc_piano_result.card;
-  bool got_card = nfc_piano_result.got_card;
-  nfc_piano_result.new_result = false;
-
-  const uint32_t now = millis();
-
-  if (!got_card) {
-    const int8_t old_note = piano_active_note_idx;
-    piano_active_card_key = "";
-    piano_active_note_idx = -1;
-    piano_last_sustain_ms = 0;
-    if (piano_stage == PianoStage::Play) {
-      piano_last_note = "-";
-      piano_status = "Tap card to play";
-      drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-    }
-    return;
-  }
-
-  const String card_key = buildPianoCardKey(card);
-  if (card_key.isEmpty()) return;
-
-  if (piano_stage == PianoStage::Config) {
-    if (card_key == piano_active_card_key) return;
-    piano_active_card_key = card_key;
-
-    for (uint8_t i = 0; i < piano_config_step; ++i) {
-      if (piano_card_map[i] == card_key) {
-        piano_status = "Card already used";
-        drawScreen();
-        return;
-      }
-    }
-
-    piano_card_map[piano_config_step] = card_key;
-    playTone(kPianoFreq[piano_config_step], 120);
-    piano_last_note = kPianoNoteName[piano_config_step];
-    ++piano_config_step;
-
-    if (piano_config_step >= kPianoNoteCount) {
-      savePianoConfig();
-      piano_stage = PianoStage::Menu;
-      piano_menu_index = 0;
-      piano_status = "Config saved 8/8";
-    } else {
-      piano_status = String("Saved ") + String(piano_config_step) + "/8";
-    }
-    drawScreen();
-    return;
-  }
-
-  const int8_t note_idx = findPianoNoteByCard(card_key);
-  const bool same_card = (card_key == piano_active_card_key);
-  piano_active_card_key = card_key;
-
-  if (note_idx < 0) {
-    const int8_t old_note = piano_active_note_idx;
-    piano_last_note = "-";
-    piano_active_note_idx = -1;
-    piano_status = "Card not mapped";
-    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-    return;
-  }
-
-  const int8_t old_note = piano_active_note_idx;
-  const bool new_note = (note_idx != piano_active_note_idx);
-  const bool need_retrigger = !same_card || new_note || (now - piano_last_sustain_ms >= kPianoSustainRetriggerMs);
-  if (need_retrigger) {
-    playTone(kPianoFreq[note_idx], kPianoSustainToneMs);
-    piano_last_sustain_ms = now;
-  }
-
-  const bool note_changed = (piano_active_note_idx != note_idx) || (piano_last_note != kPianoNoteName[note_idx]);
-  piano_active_note_idx = note_idx;
-  piano_last_note = kPianoNoteName[note_idx];
-  piano_status = "Play " + String(kPianoNoteName[note_idx]);
-  if (note_changed) {
-    drawPianoPlayDiff(old_note, piano_active_note_idx, true);
-  }
-}
-
 }  // namespace
 
 void setup() {
@@ -9461,8 +8859,6 @@ void setup() {
   } else {
     removeLegacyExampleDumps();
   }
-  loadPianoConfig();
-
   bool found_st25r3916 = false;
   bool found_ws1850s = false;
   Serial.println("[SCAN] Starting I2C bus scan...");
@@ -9653,13 +9049,11 @@ void loop() {
   nfc_w_in_home = in_home;
   nfc_w_is_reader_page = (!in_home && menu_page == MenuPage::Reader);
   nfc_w_is_ndef_page = (!in_home && menu_page == MenuPage::ReadNDEF);
-  nfc_w_is_piano_page = (!in_home && menu_page == MenuPage::Piano);
   nfc_w_is_emv_page = (!in_home && menu_page == MenuPage::EmvReader);
   nfc_w_is_fido2_page = (!in_home && menu_page == MenuPage::Fido2);
   nfc_w_reader_14b_only = reader_14b_only;
   nfc_w_card_valid = last_card.valid;
   nfc_w_wifi_popup = wifi_popup;
-  nfc_w_piano_stage = piano_stage;
 
   const bool reader_anim_active =
 #ifdef APP_TARGET_M5PAPER
@@ -10064,68 +9458,6 @@ void loop() {
         }
       }
     }
-  } else if (menu_page == MenuPage::Piano) {
-    if (piano_stage == PianoStage::Menu) {
-      if (nav_prev) {
-        piano_menu_index = static_cast<uint8_t>((piano_menu_index + 2) % 3);
-        drawScreen();
-      } else if (clicked || key_nav.next) {
-        piano_menu_index = static_cast<uint8_t>((piano_menu_index + 1) % 3);
-        drawScreen();
-      }
-      const bool hold_piano_enter = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
-      if (hold_piano_enter || key_nav.confirm) {
-        if (hold_piano_enter) {
-          btn_hold_latched = true;
-          ignore_click_after_hold = true;
-        }
-        piano_active_card_key = "";
-        piano_active_note_idx = -1;
-        piano_last_sustain_ms = 0;
-        if (piano_menu_index == 0) {
-          setSpeaker5V(true);
-          piano_stage = PianoStage::Play;
-          piano_last_note = "-";
-          piano_status = "Tap card to play";
-        } else if (piano_menu_index == 1) {
-          piano_stage = PianoStage::Config;
-          piano_config_step = 0;
-          for (uint8_t i = 0; i < kPianoNoteCount; ++i) {
-            piano_card_map[i] = "";
-          }
-          piano_last_note = "-";
-          piano_status = String("Scan ") + kPianoNoteName[piano_config_step];
-        } else {
-          goHome();
-          delay(10);
-          return;
-        }
-        drawScreen();
-      }
-      if (nav_back) {
-        goHome();
-        delay(10);
-        return;
-      }
-    } else {
-      const bool hold_piano_back = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
-      if (hold_piano_back || nav_back) {
-        if (hold_piano_back) {
-          btn_hold_latched = true;
-          ignore_click_after_hold = true;
-        }
-        piano_stage = PianoStage::Menu;
-        setSpeaker5V(false);
-        piano_menu_index = 0;
-        piano_active_card_key = "";
-        piano_active_note_idx = -1;
-        piano_last_sustain_ms = 0;
-        piano_last_note = "-";
-        const uint8_t mapped = pianoMappedCount();
-        piano_status = "Configured " + String(mapped) + "/8";
-        drawScreen();
-      }
-    }
   } else {
     if (clicked || key_nav.next || key_nav.confirm) {
       if (menu_page == MenuPage::Reader) {
@@ -10210,11 +9542,9 @@ void loop() {
     }
   }
 
-  // Process NFC worker results for Reader / Piano (non-blocking)
+  // Process NFC worker results for Reader (non-blocking)
   if (menu_page == MenuPage::Reader && !in_home) {
     processReaderResult();
-  } else if (menu_page == MenuPage::Piano && !in_home) {
-    processPianoResult();
   } else if (menu_page == MenuPage::EmvReader && !in_home) {
     processEmvResult();
   } else if (menu_page == MenuPage::Fido2 && !in_home) {
