@@ -13,6 +13,7 @@
 #include <Wire.h>
 #if defined(APP_TARGET_STICKS3)
 #include <MFRC522_I2C.h>  // [FORK] WS1850S secondary driver, Fase 1.5
+#include "emv_db.h"       // [FORK] EMV AIP-keyed auth-profile dossier (Fase 2)
 #endif
 #include <WiFi.h>
 #include <WebServer.h>
@@ -147,6 +148,11 @@ enum class MenuPage : uint8_t {
   Diagnose,
   Piano,
   About,
+  // [FORK] EMV dossier reader (RATS -> PPSE -> SELECT AID -> GPO), WS1850S
+  // only - see readWs1850sCard()/nfc_ws1850s_active. Only reachable on
+  // APP_TARGET_STICKS3 builds (the only target with the WS1850S driver
+  // wired up today) - see kHomeOrder below.
+  EmvReader,
   Count
 };
 
@@ -376,6 +382,22 @@ String piano_active_card_key;
 int8_t piano_active_note_idx = -1;
 uint32_t piano_last_sustain_ms = 0;
 
+// [FORK] UI-thread mirror of the latest NfcEmvResult, updated by
+// processEmvResult(). Drawn by the MenuPage::EmvReader branch in drawScreen().
+bool emv_card_present = false;
+bool emv_has_result = false;
+bool emv_rats_ok = false;
+bool emv_ppse_ok = false;
+bool emv_read_ok = false;
+String emv_uid;
+String emv_brand = "Unknown";
+String emv_pan;
+String emv_aid_hex;
+bool emv_aip_found = false;
+uint8_t emv_aip_byte = 0;
+String emv_auth_method, emv_crypto, emv_attack_vector, emv_year, emv_risk_label, emv_notes;
+String emv_error;
+
 // ---- NFC Worker Task (Core 0) Infrastructure ----
 // NFC I2C operations run on a dedicated FreeRTOS task on Core 0,
 // so the UI animation loop on Core 1 never blocks on I2C.
@@ -417,6 +439,28 @@ struct NfcPianoResult {
 };
 NfcPianoResult nfc_piano_result;
 
+// [FORK] Result of one EMV dossier attempt (RATS -> SELECT PPSE -> SELECT AID
+// -> GPO), filled by the worker and consumed by processEmvResult(). Mirrors
+// the ChaosID-style dossier in emv_test.cpp/printEmvDossier(), but as plain
+// fields the UI thread can draw instead of Serial-only output. WS1850S only -
+// see emvRunFullRead() below (APP_TARGET_STICKS3).
+struct NfcEmvResult {
+  bool got_card = false;    // a PICC answered WUPA/anticollision at all
+  String uid;
+  bool rats_ok = false;     // ISO14443-4 RATS succeeded
+  bool ppse_ok = false;     // SELECT PPSE + application choice succeeded
+  bool read_ok = false;     // full chain completed, dossier fields below are valid
+  String brand = "Unknown";
+  String pan;                // may stay empty (GPO Format 1, no READ RECORD yet)
+  String aid_hex;
+  bool aip_found = false;
+  uint8_t aip_byte = 0;
+  String auth_method, crypto, attack_vector, year, risk_label, notes;
+  String error;              // set when read_ok is false, names the failed step
+  bool new_result = false;
+};
+NfcEmvResult nfc_emv_result;
+
 struct NfcHealthResult {
   bool lost_connection = false;
   bool reconnected = false;
@@ -441,6 +485,8 @@ bool nfc_w_reader_14b_only = false;
 bool nfc_w_is_reader_page = false;
 bool nfc_w_is_ndef_page = false;
 bool nfc_w_is_piano_page = false;
+bool nfc_w_is_emv_page = false;
+bool nfc_w_emv_retry = false;  // UI -> worker: force a re-read of the card already on the reader
 bool nfc_w_card_valid = false;
 bool nfc_w_wifi_popup = false;
 bool nfc_w_in_home = true;
@@ -710,7 +756,14 @@ static void setSpeaker5V(bool enable) {
 #endif
 }
 
+// [FORK] EmvReader only added to the WS1850S-capable target's home carousel.
+// kHomeOrderNfcUnit (ST25R3916 / "M5 Unit NFC") never gets it - that chip
+// doesn't do ISO14443-4 APDUs the way this reader needs.
+#if defined(APP_TARGET_STICKS3)
+const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::EmvReader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+#else
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+#endif
 const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
 // Keep the same accent palette for both GroveNFC and Unit NFC to avoid UI mismatch.
 
@@ -742,6 +795,7 @@ const char* homePageName(MenuPage page) {
     case MenuPage::Piano:    return "Piano";
     case MenuPage::About:    return "About";
     case MenuPage::Diagnose: return "Diagnose";
+    case MenuPage::EmvReader: return "EMV";
     default:                 return "";
   }
 }
@@ -778,6 +832,11 @@ void drawHomeIconForPage(lgfx::v1::LGFXBase& d, int cx, int cy, MenuPage page, u
     d.fillRect(cx - 4, cy - 10, 3, 18, accent);
     d.fillRect(cx + 2, cy - 10, 3, 18, accent);
     d.fillRect(cx + 8, cy - 10, 3, 18, accent);
+  } else if (page == MenuPage::EmvReader) {
+    // Simple credit-card-with-chip glyph.
+    d.fillRect(cx - 18, cy - 13, 36, 26, accent);
+    d.fillRect(cx - 14, cy - 9, 28, 18, TFT_BLACK);
+    d.fillRect(cx - 10, cy - 5, 10, 8, accent);
   }
 }
 
@@ -797,6 +856,8 @@ const char* pageName(MenuPage page) {
       return "Piano";
     case MenuPage::About:
       return "About";
+    case MenuPage::EmvReader:
+      return "EMV";
     default:
       return "Unknown";
   }
@@ -5473,6 +5534,7 @@ void drawScreen(bool popup_only) {
   if (menu_page == MenuPage::Diagnose) accent = TFT_YELLOW;
   if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
   if (menu_page == MenuPage::About) accent = TFT_CYAN;
+  if (menu_page == MenuPage::EmvReader) accent = TFT_YELLOW;
   // Unit NFC and GroveNFC share the same color mapping.
 
 #ifdef APP_TARGET_M5PAPER
@@ -5759,6 +5821,7 @@ void drawScreen(bool popup_only) {
     else if (menu_page == MenuPage::WebFiles) page_title = "Dumps";
     else if (menu_page == MenuPage::Piano) page_title = "Piano";
     else if (menu_page == MenuPage::About) page_title = "About";
+    else if (menu_page == MenuPage::EmvReader) page_title = "EMV";
     else page_title = "Diagnose";
     drawHeaderBar(page_title, true);
     if (menu_page == MenuPage::WebFiles && emu_dump_count > 0 && !dumps_pick_for_emu) {
@@ -5888,6 +5951,31 @@ void drawScreen(bool popup_only) {
       d.print(title);
       d.setTextColor(TFT_WHITE, TFT_BLACK);
       drawWrappedText(d, 4, content_top + 20, w - 8, 18, 2, 12, body, TFT_WHITE, TFT_BLACK);
+    } else if (menu_page == MenuPage::EmvReader) {
+      // [FORK] ChaosID-style dossier for the EMV card actually on the reader -
+      // see emvRunFullRead()/NfcEmvResult. WS1850S only (nfc_ws1850s_active).
+      String title;
+      String body;
+      if (!emv_card_present) {
+        title = "EMV";
+        body = "Aproxime um cartao\nEMV (leitura somente)";
+      } else if (!emv_has_result) {
+        title = "Lendo...";
+        body = "UID " + emv_uid;
+      } else if (!emv_read_ok) {
+        title = "Falhou";
+        body = emv_error + "\nClique para tentar de novo";
+      } else {
+        title = emv_brand;
+        body = "PAN " + (emv_pan.length() ? emv_pan : String("(nao lido)")) + "\n"
+             + "AID " + emv_aid_hex + "\n"
+             + emv_auth_method + " - " + emv_risk_label;
+      }
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(title);
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, content_top + 20, w - 8, 16, 3, 12, body, TFT_WHITE, TFT_BLACK);
     } else if (menu_page == MenuPage::WebFiles) {
       if (dumps_stage == DumpsStage::PortalQr || dumps_stage == DumpsStage::Preview) {
         drawDumpsPage(d, 0, 0, w, h, accent);
@@ -6943,6 +7031,19 @@ void enterCurrentFeature() {
     piano_last_note = "-";
     const uint8_t mapped = pianoMappedCount();
     piano_status = "Configured " + String(mapped) + "/8";
+  } else if (menu_page == MenuPage::EmvReader) {
+    emv_card_present = false;
+    emv_has_result = false;
+    emv_rats_ok = false;
+    emv_ppse_ok = false;
+    emv_read_ok = false;
+    emv_uid = "";
+    emv_brand = "Unknown";
+    emv_pan = "";
+    emv_aid_hex = "";
+    emv_aip_found = false;
+    emv_error = "";
+    nfc_w_emv_retry = true;
   }
 
   drawScreen();
@@ -6971,6 +7072,21 @@ void enterMenu(MenuPage mode) {
     ndef_is_wifi = false;
     wifi_status = "";
     last_ndef_auto_ms = 0;
+  }
+
+  if (menu_page == MenuPage::EmvReader) {
+    emv_card_present = false;
+    emv_has_result = false;
+    emv_rats_ok = false;
+    emv_ppse_ok = false;
+    emv_read_ok = false;
+    emv_uid = "";
+    emv_brand = "Unknown";
+    emv_pan = "";
+    emv_aid_hex = "";
+    emv_aip_found = false;
+    emv_error = "";
+    nfc_w_emv_retry = true;
   }
 
   if (menu_page == MenuPage::Emulator && nfc_ready) {
@@ -7379,6 +7495,375 @@ bool readWs1850sCard(CardInfo& card) {
   mfrc522_ws1850s.PICC_HaltA();
   return true;
 }
+
+// [FORK] EMV dossier reader, ported from src/emv_test.cpp (validated
+// end-to-end on real hardware there) onto the main firmware's mfrc522_ws1850s
+// object. Same RATS -> SELECT PPSE -> SELECT AID -> GPO flow, same ISO14443-4
+// WTX/chaining handling - see emv_test.cpp's comments for the protocol-level
+// gotchas (FSDI=5, extended PCD timeout, N(R) = i_bn(pcb) ^ 0x01, etc.), not
+// repeated here. Fills an NfcEmvResult instead of only Serial-printing it.
+
+// [FORK] Same fix as emv_test.cpp: EMV cards declare FWI >= 7-8 in their ATS,
+// needing 40-80ms+ per APDU - the 25ms default hardware timeout isn't enough.
+void emvSetPcdTimeoutMs(uint16_t ms) {
+  uint16_t ticks = (uint16_t)((uint32_t)ms * 1000 / 25);
+  mfrc522_ws1850s.PCD_WriteRegister(MFRC522::TReloadRegH, (ticks >> 8) & 0xFF);
+  mfrc522_ws1850s.PCD_WriteRegister(MFRC522::TReloadRegL, ticks & 0xFF);
+}
+
+bool emvAppendCRC(byte* buf, byte& len) {
+  byte crc[2];
+  if (mfrc522_ws1850s.PCD_CalculateCRC(buf, len, crc) != MFRC522::STATUS_OK) {
+    return false;
+  }
+  buf[len++] = crc[0];
+  buf[len++] = crc[1];
+  return true;
+}
+
+bool emvDoRATS() {
+  byte cmd[4] = {0xE0, 0x50};  // RATS, FSDI=5 (FSD=64, matches WS1850S FIFO), CID=0
+  byte cmdLen = 2;
+  if (!emvAppendCRC(cmd, cmdLen)) return false;
+
+  byte back[64];
+  byte backLen = sizeof(back);
+  byte status = mfrc522_ws1850s.PCD_TransceiveData(cmd, cmdLen, back, &backLen, NULL, 0, true);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.printf("[EMV] RATS failed, status=%d\n", status);
+    return false;
+  }
+  return true;
+}
+
+const char* emvPcbBlockType(byte pcb) {
+  if ((pcb & 0xC0) == 0x00) return "I-block";
+  if ((pcb & 0xC0) == 0x80) return "R-block";
+  if ((pcb & 0xC0) == 0xC0) return "S-block";
+  return "?";
+}
+
+// respOut must have room for at least respCapacity bytes. Handles S(WTX) and
+// I-block chaining per ISO/IEC 14443-4 - see emv_test.cpp::sendIBlock() for
+// the full rationale (same logic, just renamed to avoid clashing with that
+// standalone sketch's own copy, which stays excluded from this build).
+bool emvSendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte respCapacity) {
+  byte frame[64];
+  frame[0] = 0x02;  // I-block, block number 0, no chaining
+  memcpy(frame + 1, apdu, apduLen);
+  byte frameLen = apduLen + 1;
+  if (!emvAppendCRC(frame, frameLen)) return false;
+
+  byte back[64];
+  byte backLen = sizeof(back);
+  byte status = mfrc522_ws1850s.PCD_TransceiveData(frame, frameLen, back, &backLen, NULL, 0, true);
+
+  respLen = 0;
+  byte rounds = 0;
+  while (status == MFRC522::STATUS_OK && backLen >= 1 && rounds < 100) {
+    byte pcb = back[0];
+
+    if ((pcb & 0xF0) == 0xF0) {
+      byte wtxm = back[1];
+      byte wtxResp[4] = {pcb, wtxm};
+      byte wtxRespLen = 2;
+      emvAppendCRC(wtxResp, wtxRespLen);
+      backLen = sizeof(back);
+      status = mfrc522_ws1850s.PCD_TransceiveData(wtxResp, wtxRespLen, back, &backLen, NULL, 0, true);
+      ++rounds;
+      continue;
+    }
+
+    if ((pcb & 0xC0) == 0x00) {
+      byte chunkLen = backLen - 3;  // strip PCB(1) + trailing CRC_A(2)
+      if (respLen + chunkLen > respCapacity) {
+        Serial.println("[EMV] Response exceeds buffer capacity, aborting");
+        return false;
+      }
+      memcpy(respOut + respLen, back + 1, chunkLen);
+      respLen += chunkLen;
+
+      if (!(pcb & 0x10)) {
+        return true;
+      }
+
+      byte theirBn = pcb & 0x01;
+      byte ackBn = theirBn ^ 0x01;
+      byte rblock[4] = {(byte)(0xA2 | ackBn)};
+      byte rblockLen = 1;
+      emvAppendCRC(rblock, rblockLen);
+      backLen = sizeof(back);
+      status = mfrc522_ws1850s.PCD_TransceiveData(rblock, rblockLen, back, &backLen, NULL, 0, true);
+      ++rounds;
+      continue;
+    }
+
+    Serial.printf("[EMV] Unexpected PCB=0x%02X mid-exchange\n", pcb);
+    return false;
+  }
+  Serial.printf("[EMV] I-block exchange failed, status=%d\n", status);
+  return false;
+}
+
+struct EmvTlvEntry {
+  uint16_t tag;
+  byte* value;
+  byte len;
+};
+
+byte emvParseTlvLevel(byte* buf, byte len, EmvTlvEntry* out, byte maxOut) {
+  byte count = 0;
+  byte i = 0;
+  while (i < len && count < maxOut) {
+    uint16_t tag = buf[i];
+    byte tagBytes = 1;
+    if ((buf[i] & 0x1F) == 0x1F) {
+      if (i + 1 >= len) break;
+      tag = ((uint16_t)buf[i] << 8) | buf[i + 1];
+      tagBytes = 2;
+    }
+    i += tagBytes;
+    if (i >= len) break;
+
+    byte tlvLen = buf[i];
+    i += 1;
+    if (tlvLen & 0x80) {
+      byte lenOfLen = tlvLen & 0x7F;
+      if (lenOfLen != 1 || i >= len) break;
+      tlvLen = buf[i];
+      i += 1;
+    }
+    if (i + tlvLen > len) break;
+
+    out[count].tag = tag;
+    out[count].value = buf + i;
+    out[count].len = tlvLen;
+    ++count;
+    i += tlvLen;
+  }
+  return count;
+}
+
+struct EmvAppCandidate {
+  byte aid[16];
+  byte aidLen;
+  String label;
+  byte priority;
+  bool isCredit;
+  String brand;
+};
+
+String emvDetectBrand(const String& upperLabel) {
+  if (upperLabel.indexOf("VISA") >= 0) return "Visa";
+  if (upperLabel.indexOf("MASTERCARD") >= 0 || upperLabel.indexOf("MASTER") >= 0) return "Mastercard";
+  if (upperLabel.indexOf("ELO") >= 0) return "Elo";
+  if (upperLabel.indexOf("AMEX") >= 0 || upperLabel.indexOf("AMERICAN EXPRESS") >= 0) return "Amex";
+  if (upperLabel.indexOf("HIPERCARD") >= 0) return "Hipercard";
+  return "Unknown";
+}
+
+String emvParseTrack2(byte* track2, byte track2Len) {
+  String pan = "";
+  bool foundSeparator = false;
+  for (byte i = 0; i < track2Len && !foundSeparator; i++) {
+    byte hi = (track2[i] >> 4) & 0x0F;
+    byte lo = track2[i] & 0x0F;
+    byte nibbles[2] = {hi, lo};
+    for (byte n = 0; n < 2; n++) {
+      if (nibbles[n] == 0x0D) { foundSeparator = true; break; }
+      pan += (char)('0' + nibbles[n]);
+    }
+  }
+  return pan;
+}
+
+// [FORK] Full read chain for one card presentation. Linear (not recursive
+// like emv_test.cpp's parsePPSEResponse->trySelectAID->tryGPO chain) so every
+// field lands directly in `er` instead of through the g_emv_brand/g_emv_aid
+// globals that sketch uses - this runs from the worker task, so no globals
+// shared with anything else.
+void emvRunFullRead(NfcEmvResult& er) {
+  if (!emvDoRATS()) { er.error = "RATS falhou"; return; }
+  er.rats_ok = true;
+  // [FORK] Card's ATS asked for ~77ms (FWI=8) in testing; 150ms gives margin.
+  emvSetPcdTimeoutMs(150);
+
+  byte selectPPSE[] = {
+    0x00, 0xA4, 0x04, 0x00, 0x0E,
+    '2', 'P', 'A', 'Y', '.', 'S', 'Y', 'S', '.', 'D', 'D', 'F', '0', '1',
+    0x00
+  };
+  byte resp[200];
+  byte respLen = 0;
+  if (!emvSendIBlock(selectPPSE, sizeof(selectPPSE), resp, respLen, sizeof(resp))) {
+    er.error = "SELECT PPSE sem resposta";
+    return;
+  }
+  if (respLen < 2 || resp[respLen - 2] != 0x90 || resp[respLen - 1] != 0x00) {
+    er.error = "SELECT PPSE recusado pelo cartao";
+    return;
+  }
+
+  EmvTlvEntry top[4];
+  byte n = emvParseTlvLevel(resp, respLen - 2, top, 4);
+  byte* fciVal = nullptr; byte fciLen = 0;
+  for (byte i = 0; i < n; i++) if (top[i].tag == 0x6F) { fciVal = top[i].value; fciLen = top[i].len; }
+  if (!fciVal) { er.error = "FCI (6F) nao encontrado"; return; }
+
+  EmvTlvEntry fciChildren[4];
+  byte nc = emvParseTlvLevel(fciVal, fciLen, fciChildren, 4);
+  byte* a5Val = nullptr; byte a5Len = 0;
+  for (byte i = 0; i < nc; i++) if (fciChildren[i].tag == 0xA5) { a5Val = fciChildren[i].value; a5Len = fciChildren[i].len; }
+  if (!a5Val) { er.error = "FCI proprietary (A5) nao encontrado"; return; }
+
+  EmvTlvEntry a5Children[4];
+  byte na5 = emvParseTlvLevel(a5Val, a5Len, a5Children, 4);
+  byte* discVal = nullptr; byte discLen = 0;
+  for (byte i = 0; i < na5; i++) if (a5Children[i].tag == 0xBF0C) { discVal = a5Children[i].value; discLen = a5Children[i].len; }
+  if (!discVal) { er.error = "FCI issuer discretionary (BF0C) nao encontrado"; return; }
+
+  EmvTlvEntry apps[4];
+  byte napps = emvParseTlvLevel(discVal, discLen, apps, 4);
+
+  EmvAppCandidate candidates[4];
+  byte candCount = 0;
+  for (byte i = 0; i < napps && candCount < 4; i++) {
+    if (apps[i].tag != 0x61) continue;
+    EmvTlvEntry fields[6];
+    byte nf = emvParseTlvLevel(apps[i].value, apps[i].len, fields, 6);
+
+    EmvAppCandidate& c = candidates[candCount];
+    c.aidLen = 0;
+    c.priority = 0xFF;
+    c.label = "";
+    for (byte j = 0; j < nf; j++) {
+      if (fields[j].tag == 0x4F) {
+        c.aidLen = fields[j].len;
+        memcpy(c.aid, fields[j].value, c.aidLen);
+      } else if (fields[j].tag == 0x50) {
+        for (byte k = 0; k < fields[j].len; k++) c.label += (char)fields[j].value[k];
+      } else if (fields[j].tag == 0x87 && fields[j].len >= 1) {
+        c.priority = fields[j].value[0];
+      }
+    }
+    String upperLabel = c.label;
+    upperLabel.toUpperCase();
+    c.isCredit = upperLabel.indexOf("CREDIT") >= 0 || upperLabel.indexOf("CREDITO") >= 0;
+    c.brand = emvDetectBrand(upperLabel);
+    ++candCount;
+  }
+  if (candCount == 0) { er.error = "Nenhuma aplicacao no PPSE"; return; }
+
+  int8_t chosen = -1;
+  for (byte i = 0; i < candCount; i++) {
+    if (candidates[i].isCredit) { chosen = i; break; }
+  }
+  if (chosen < 0) {
+    byte bestPriority = 0xFF;
+    for (byte i = 0; i < candCount; i++) {
+      if (candidates[i].priority < bestPriority) { bestPriority = candidates[i].priority; chosen = i; }
+    }
+  }
+  if (chosen < 0) { er.error = "Nenhuma aplicacao selecionavel"; return; }
+
+  er.ppse_ok = true;
+  er.brand = candidates[chosen].brand;
+  {
+    char hexbuf[33] = {0};
+    for (byte i = 0; i < candidates[chosen].aidLen; i++) {
+      char b[3];
+      snprintf(b, sizeof(b), "%02X", candidates[chosen].aid[i]);
+      strncat(hexbuf, b, sizeof(hexbuf) - strlen(hexbuf) - 1);
+    }
+    er.aid_hex = String(hexbuf);
+  }
+
+  byte selectAID[16];
+  selectAID[0] = 0x00; selectAID[1] = 0xA4; selectAID[2] = 0x04; selectAID[3] = 0x00;
+  selectAID[4] = candidates[chosen].aidLen;
+  memcpy(selectAID + 5, candidates[chosen].aid, candidates[chosen].aidLen);
+  selectAID[5 + candidates[chosen].aidLen] = 0x00;
+  byte selCmdLen = 6 + candidates[chosen].aidLen;
+
+  byte selResp[200]; byte selRespLen = 0;
+  if (!emvSendIBlock(selectAID, selCmdLen, selResp, selRespLen, sizeof(selResp))) {
+    er.error = "SELECT AID sem resposta";
+    return;
+  }
+  if (selRespLen < 2 || selResp[selRespLen - 2] != 0x90 || selResp[selRespLen - 1] != 0x00) {
+    er.error = "SELECT AID recusado pelo cartao";
+    return;
+  }
+
+  byte pdolData[] = {
+    0x36, 0x00, 0x40, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x76,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x03, 0xDA,
+    0x26, 0x08, 0x06,
+    0x00,
+    0x00, 0x00, 0x00, 0x00,
+  };
+  byte pdolLen = sizeof(pdolData);
+  byte gpo[40];
+  gpo[0] = 0x80; gpo[1] = 0xA8; gpo[2] = 0x00; gpo[3] = 0x00;
+  gpo[4] = pdolLen + 2;
+  gpo[5] = 0x83; gpo[6] = pdolLen;
+  memcpy(gpo + 7, pdolData, pdolLen);
+  byte gpoCmdLen = 7 + pdolLen;
+  gpo[gpoCmdLen++] = 0x00;
+
+  byte gpoResp[200]; byte gpoRespLen = 0;
+  if (!emvSendIBlock(gpo, gpoCmdLen, gpoResp, gpoRespLen, sizeof(gpoResp))) {
+    er.error = "GPO sem resposta";
+    return;
+  }
+  if (gpoRespLen < 2 || gpoResp[gpoRespLen - 2] != 0x90 || gpoResp[gpoRespLen - 1] != 0x00) {
+    er.error = "GPO recusado pelo cartao";
+    return;
+  }
+
+  byte gpoDataLen = gpoRespLen - 2;
+  if (gpoDataLen < 2) { er.error = "GPO: resposta vazia"; return; }
+
+  if (gpoResp[0] == 0x77) {
+    EmvTlvEntry fields[10];
+    byte nf = emvParseTlvLevel(gpoResp + 2, gpoDataLen - 2, fields, 10);
+    byte* track2Val = nullptr; byte track2Len = 0;
+    for (byte i = 0; i < nf; i++) {
+      if (fields[i].tag == 0x57) {
+        track2Val = fields[i].value;
+        track2Len = fields[i].len;
+      } else if (fields[i].tag == 0x82 && fields[i].len >= 1) {
+        er.aip_byte = fields[i].value[0];
+        er.aip_found = true;
+      }
+    }
+    if (track2Val) er.pan = emvParseTrack2(track2Val, track2Len);
+  } else if (gpoResp[0] == 0x80) {
+    // Format 1 (AIP+AFL only, not BER-TLV) - Track2 would need READ RECORD,
+    // not implemented yet (same limitation documented in emv_test.cpp).
+    er.aip_found = gpoDataLen >= 3;
+    er.aip_byte = er.aip_found ? gpoResp[2] : 0x00;
+  } else {
+    er.error = "GPO: formato de resposta desconhecido";
+    return;
+  }
+
+  const EmvAuthProfile* p = emvProfileForAip(er.aip_found ? er.aip_byte : 0x00);
+  er.auth_method = p->auth_method;
+  er.crypto = p->crypto;
+  er.attack_vector = p->attack_vector;
+  er.year = p->year;
+  er.risk_label = emvRiskLabel(p->risk);
+  er.notes = p->notes;
+  er.read_ok = true;
+  Serial.printf("[EMV][MAIN] %s PAN=%s AIP=0x%02X risk=%s\n",
+                er.brand.c_str(), er.pan.length() ? er.pan.c_str() : "(n/d)",
+                er.aip_byte, er.risk_label.c_str());
+}
 #endif
 
 // [FORK] Routes card reads to whichever backend is active (ST25R3916 via
@@ -7543,6 +8028,10 @@ void nfcWorkerTask(void* /*param*/) {
   uint32_t w_last_recover_ms = 0;
   uint8_t w_reader_fail_streak = 0;
   uint8_t w_ndef_fail_count = 0;
+#if defined(APP_TARGET_STICKS3)
+  uint32_t w_last_emv_poll_ms = 0;
+  String w_emv_last_uid;  // only re-run the full APDU chain when the UID changes
+#endif
 
   for (;;) {
     // --- Process one-shot commands from UI (non-blocking) ---
@@ -7789,6 +8278,55 @@ void nfcWorkerTask(void* /*param*/) {
       }
     }
 
+#if defined(APP_TARGET_STICKS3)
+    // --- handleEmvReader (periodic EMV dossier attempt) ---
+    // WS1850S only - the ST25R3916 ("Unit NFC") path never sets
+    // nfc_w_is_emv_page (EmvReader is excluded from kHomeOrderNfcUnit).
+    // Re-reads the full APDU chain only when a new UID shows up (or the UI
+    // asked for a retry via nfc_w_emv_retry) - GPO alone can take 1-3s, way
+    // too slow to repeat every poll tick like the plain Reader page does.
+    if (nfc_ws1850s_active && !w_in_home && nfc_w_is_emv_page) {
+      if (now - w_last_emv_poll_ms >= kPollIntervalMs) {
+        w_last_emv_poll_ms = now;
+        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(3000)) == pdTRUE) {
+          byte bufferATQA[2];
+          byte bufferSize = sizeof(bufferATQA);
+          byte wakeupStatus = mfrc522_ws1850s.PICC_WakeupA(bufferATQA, &bufferSize);
+          bool got_uid = false;
+          String uid;
+          if (wakeupStatus == MFRC522::STATUS_OK || wakeupStatus == MFRC522::STATUS_COLLISION) {
+            if (mfrc522_ws1850s.PICC_ReadCardSerial()) {
+              got_uid = true;
+              for (byte i = 0; i < mfrc522_ws1850s.uid.size; i++) {
+                char buf[3];
+                snprintf(buf, sizeof(buf), "%02X", mfrc522_ws1850s.uid.uidByte[i]);
+                uid += buf;
+              }
+            }
+          }
+          if (!got_uid) {
+            w_emv_last_uid = "";
+            NfcEmvResult er;
+            er.got_card = false;
+            er.new_result = true;
+            nfc_emv_result = er;
+          } else if (uid != w_emv_last_uid || nfc_w_emv_retry) {
+            w_emv_last_uid = uid;
+            nfc_w_emv_retry = false;
+            NfcEmvResult er;
+            er.got_card = true;
+            er.uid = uid;
+            emvRunFullRead(er);
+            er.new_result = true;
+            nfc_emv_result = er;
+            mfrc522_ws1850s.PICC_HaltA();
+          }
+          xSemaphoreGive(nfc_mutex);
+        }
+      }
+    }
+#endif
+
     // --- autoScanNdef (periodic NDEF poll) ---
     if (nfc_ready && !w_in_home && nfc_w_is_ndef_page && !nfc_w_wifi_popup) {
       if (now - w_last_ndef_ms >= kNdefAutoPollMs) {
@@ -7975,6 +8513,41 @@ void processHealthResult() {
     }
     drawScreen();
   }
+}
+
+// UI-side: process EMV dossier result from NFC worker
+void processEmvResult() {
+  if (!nfc_emv_result.new_result) return;
+  NfcEmvResult r = nfc_emv_result;
+  nfc_emv_result.new_result = false;
+
+  emv_card_present = r.got_card;
+  if (!r.got_card) {
+    emv_has_result = false;
+    emv_uid = "";
+    drawScreen();
+    return;
+  }
+
+  emv_has_result = true;
+  emv_uid = r.uid;
+  emv_rats_ok = r.rats_ok;
+  emv_ppse_ok = r.ppse_ok;
+  emv_read_ok = r.read_ok;
+  emv_brand = r.brand;
+  emv_pan = r.pan;
+  emv_aid_hex = r.aid_hex;
+  emv_aip_found = r.aip_found;
+  emv_aip_byte = r.aip_byte;
+  emv_auth_method = r.auth_method;
+  emv_crypto = r.crypto;
+  emv_attack_vector = r.attack_vector;
+  emv_year = r.year;
+  emv_risk_label = r.risk_label;
+  emv_notes = r.notes;
+  emv_error = r.error;
+  if (r.read_ok) playSuccessTone();
+  drawScreen();
 }
 
 // UI-side: process piano result from NFC worker
@@ -8376,6 +8949,7 @@ void loop() {
   nfc_w_is_reader_page = (!in_home && menu_page == MenuPage::Reader);
   nfc_w_is_ndef_page = (!in_home && menu_page == MenuPage::ReadNDEF);
   nfc_w_is_piano_page = (!in_home && menu_page == MenuPage::Piano);
+  nfc_w_is_emv_page = (!in_home && menu_page == MenuPage::EmvReader);
   nfc_w_reader_14b_only = reader_14b_only;
   nfc_w_card_valid = last_card.valid;
   nfc_w_wifi_popup = wifi_popup;
@@ -8869,6 +9443,12 @@ void loop() {
         drawScreen();
       } else if (menu_page == MenuPage::Diagnose) {
         runDiagnose();
+      } else if (menu_page == MenuPage::EmvReader) {
+        // Force a re-read even if a card is still sitting on the reader.
+        emv_has_result = false;
+        emv_error = "";
+        nfc_w_emv_retry = true;
+        drawScreen();
       }
     }
     const bool hold_go_home = mainButtonPressedFor(kHoldPressMs) && !btn_hold_latched;
@@ -8886,6 +9466,8 @@ void loop() {
     processReaderResult();
   } else if (menu_page == MenuPage::Piano && !in_home) {
     processPianoResult();
+  } else if (menu_page == MenuPage::EmvReader && !in_home) {
+    processEmvResult();
   }
 
   delay(reader_anim_active ? 1 : 10);
