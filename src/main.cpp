@@ -798,6 +798,17 @@ const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, Menu
 // Keep the same accent palette for both GroveNFC and Unit NFC to avoid UI mismatch.
 
 inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
+
+// [FORK] Display-only relabel: nfc_module_name itself ("GroveNFC" / "M5 Unit
+// NFC") stays untouched because isNfcUnitMode()/isEmuTypeSupportedCurrentMode()
+// above key off those exact strings coming from GroveNFC::deviceName(). This
+// just maps them to the names the boards are actually sold/known as whenever
+// we print the detected module on screen (home brand, status bar, boot line).
+inline String displayModuleName(const String& name) {
+  if (name == "M5 Unit NFC") return "NFC";
+  if (name == "GroveNFC") return "RFID 2";
+  return name;
+}
 inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
   if (isNfcUnitMode()) {
     return type == EmuType::N213 || type == EmuType::N215 || type == EmuType::N216 || type == EmuType::Felica;
@@ -4209,26 +4220,43 @@ void drawHomeIconDumps(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
   d.fillRect(x + 16, y + 27, 16, 3, accent);
 }
 
+// [FORK] 3 pages now (was 2): Hardware, Credits (fork/base/ChaosID/brand),
+// then the QR code - see the "% 3" at the hold/click handler that cycles
+// about_page_idx. Hardware labels use displayModuleName()'s commercial
+// names (NFC / RFID 2) so this matches what's shown elsewhere on screen.
 void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t accent, int8_t page_idx) {
   d.fillRect(x, y, w, h, TFT_BLACK);
   d.setFont(&fonts::Font0);
   d.setTextSize(2);
+  const int line_h = 20;
+  const int indent = 12;
   if (page_idx == 0) {
-    const int line_h = 20;
-    const int indent = 12;
     int ty = y + 4;
     d.setTextColor(accent, TFT_BLACK);
     d.setCursor(x + 2, ty); d.print("IIC Hardware"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(x + 2 + indent, ty); d.print("M5 Unit NFC"); ty += line_h;
-    d.setCursor(x + 2 + indent, ty); d.print("MT GroveNFC"); ty += line_h;
-    ty += line_h / 2;
+    d.setCursor(x + 2 + indent, ty); d.print("NFC (M5 Unit)"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("RFID 2 (GroveNFC)"); ty += line_h;
+  } else if (page_idx == 1) {
+    int ty = y + 4;
     d.setTextColor(accent, TFT_BLACK);
-    d.setCursor(x + 2, ty); d.print("Github"); ty += line_h;
+    d.setCursor(x + 2, ty); d.print("Fork"); ty += line_h;
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setCursor(x + 2 + indent, ty); d.print("cybersantana83"); ty += line_h;
+    d.setTextColor(accent, TFT_BLACK);
+    d.setCursor(x + 2, ty); d.print("Base project"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
     d.setCursor(x + 2 + indent, ty); d.print("whywilson/GroveNFC"); ty += line_h;
+    d.setTextColor(accent, TFT_BLACK);
+    d.setCursor(x + 2, ty); d.print("FIDO2 recognition"); ty += line_h;
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setCursor(x + 2 + indent, ty); d.print("ChaosID / fido2-nfc-scanner"); ty += line_h;
+    d.setTextColor(accent, TFT_BLACK);
+    d.setCursor(x + 2, ty); d.print("Brand"); ty += line_h;
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setCursor(x + 2 + indent, ty); d.print("Cafe com Solda");
   } else {
-    const char* url = "github.com/whywilson/GroveNFC";
+    const char* url = "github.com/cybersantana83/GroveNFC";
     const int qr_size = max(24, min(w, h));
     const int qr_x = x + (w - qr_size) / 2;
     const int qr_y = y + (h - qr_size) / 2;
@@ -4265,7 +4293,7 @@ void drawReaderUnitName(lgfx::v1::LGFXBase& d,
                         int width,
                         int height,
                         uint16_t accent) {
-  String unit_text = upperText(nfc_module_name);
+  String unit_text = upperText(displayModuleName(nfc_module_name));
   d.setFont(&fonts::Font2);
   d.setTextSize(1);
   d.setTextWrap(false);
@@ -5240,9 +5268,16 @@ static void drawM5PaperAboutPage() {
                               "MIFARE Classic 1K/4K, NTAG213, NTAG215, NTAG216, ISO14443B, FeliCa and ISO15693. JSON/BIN dumps can be loaded from LittleFS.");
   g_canvas.setTextSize(2);
   g_canvas.setCursor(28, 870);
-  g_canvas.printf("Module: %s  %s", nfc_module_name.c_str(), nfc_port_name.c_str());
+  g_canvas.printf("Module: %s  %s", displayModuleName(nfc_module_name).c_str(), nfc_port_name.c_str());
   g_canvas.setCursor(28, 896);
   g_canvas.printf("HW:%04X  FW:%04X", hw_ver, fw_ver);
+  // [FORK] Credits: cybersantana83 fork (base whywilson/GroveNFC), FIDO2
+  // recognition ported from ChaosID/fido2-nfc-scanner, Cafe com Solda brand.
+  g_canvas.setTextSize(1);
+  g_canvas.setCursor(28, 924);
+  g_canvas.print("Fork: cybersantana83 (base whywilson/GroveNFC)");
+  g_canvas.setCursor(28, 940);
+  g_canvas.print("FIDO2: ChaosID/fido2-nfc-scanner  |  Cafe com Solda");
 }
 #endif
  
@@ -5394,7 +5429,7 @@ void drawScreen(bool popup_only) {
       d.setTextColor(breathingColor(accent), TFT_BLACK);
       d.setTextSize(2);
       d.setFont(&fonts::Font0);
-      String brand_s3 = nfc_module_name;
+      String brand_s3 = displayModuleName(nfc_module_name);
       const int brand_w = d.textWidth(brand_s3);
       d.setCursor((w - brand_w) / 2, 4);
       d.print(brand_s3);
@@ -5811,7 +5846,7 @@ void drawScreen(bool popup_only) {
         }
       }
     } else if (menu_page == MenuPage::About) {
-      if (about_page_idx == 1) {
+      if (about_page_idx == 2) {
         drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
       } else {
         drawAboutPage(d, 4, content_top + 2, w - 8, content_h - 4, accent, about_page_idx);
@@ -5968,7 +6003,7 @@ void drawScreen(bool popup_only) {
     hd.setCursor(4, 5);
     hd.print("GroveNFC");
     hd.setTextSize(1);
-    const String module_port = nfc_module_name + " " + nfc_port_name;
+    const String module_port = displayModuleName(nfc_module_name) + " " + nfc_port_name;
     hd.setCursor(screen_w - hd.textWidth(module_port) - 4, 8);
     hd.print(module_port);
 
@@ -6165,7 +6200,7 @@ void drawScreen(bool popup_only) {
       if (body_line.isEmpty()) body_line = "Mode: 14B ONLY";
       else body_line += "  14B";
     }
-    body_line += "  " + nfc_module_name;
+    body_line += "  " + displayModuleName(nfc_module_name);
   } else if (menu_page == MenuPage::ReadNDEF) {
     sub_title_line = "NDEF";
     title_line = "Scanning";
@@ -6332,7 +6367,7 @@ void drawScreen(bool popup_only) {
       drawDumpsPage(d, 4, 26, w - 8, h - 30, accent);
     }
   } else if (menu_page == MenuPage::About) {
-    if (about_page_idx == 1) {
+    if (about_page_idx == 2) {
       drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
     } else {
       drawAboutPage(d, 4, 26, w - 8, h - 30, accent, about_page_idx);
@@ -7047,7 +7082,7 @@ void runBootDebugFlow() {
     row++;
   };
 
-  drawLine(String("[BOOT] ") + nfc_module_name, TFT_GREEN, 150);
+  drawLine(String("[BOOT] ") + displayModuleName(nfc_module_name), TFT_GREEN, 150);
   if (!nfc_ready) {
     drawLine("[FAIL] NFC not ready", TFT_RED, 1500);
     // [FORK] Don't clobber a more specific notice (e.g. WS1850S detection)
@@ -9483,7 +9518,7 @@ void loop() {
         refreshDumpFiles(dumps_pick_for_emu);
         drawScreen();
       } else if (menu_page == MenuPage::About) {
-        about_page_idx = (about_page_idx + 1) % 2;
+        about_page_idx = (about_page_idx + 1) % 3;
         drawScreen();
       } else if (menu_page == MenuPage::Diagnose) {
         runDiagnose();
