@@ -4220,10 +4220,13 @@ void drawHomeIconDumps(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent) {
   d.fillRect(x + 16, y + 27, 16, 3, accent);
 }
 
-// [FORK] 3 pages now (was 2): Hardware, Credits (fork/base/ChaosID/brand),
-// then the QR code - see the "% 3" at the hold/click handler that cycles
-// about_page_idx. Hardware labels use displayModuleName()'s commercial
-// names (NFC / RFID 2) so this matches what's shown elsewhere on screen.
+// [FORK] 4 pages now (was 2): Hardware, Credits 1/2 (fork+base,
+// FIDO2+brand), then the QR code - see the "% 4" at the hold/click handler
+// that cycles about_page_idx. Hardware labels use displayModuleName()'s
+// commercial names (NFC / RFID 2) so this matches what's shown elsewhere on
+// screen. Credits split across two pages of 2 label/value pairs each - a
+// single page with all 4 pairs overflowed the StickS3's small content area
+// and got clipped off the bottom of the screen.
 void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t accent, int8_t page_idx) {
   d.fillRect(x, y, w, h, TFT_BLACK);
   d.setFont(&fonts::Font0);
@@ -4246,11 +4249,13 @@ void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
     d.setTextColor(accent, TFT_BLACK);
     d.setCursor(x + 2, ty); d.print("Base project"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(x + 2 + indent, ty); d.print("whywilson/GroveNFC"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("whywilson/GroveNFC");
+  } else if (page_idx == 2) {
+    int ty = y + 4;
     d.setTextColor(accent, TFT_BLACK);
     d.setCursor(x + 2, ty); d.print("FIDO2 recognition"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.setCursor(x + 2 + indent, ty); d.print("ChaosID / fido2-nfc-scanner"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("ChaosID"); ty += line_h;
     d.setTextColor(accent, TFT_BLACK);
     d.setCursor(x + 2, ty); d.print("Brand"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -5846,7 +5851,7 @@ void drawScreen(bool popup_only) {
         }
       }
     } else if (menu_page == MenuPage::About) {
-      if (about_page_idx == 2) {
+      if (about_page_idx == 3) {
         drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
       } else {
         drawAboutPage(d, 4, content_top + 2, w - 8, content_h - 4, accent, about_page_idx);
@@ -6367,7 +6372,7 @@ void drawScreen(bool popup_only) {
       drawDumpsPage(d, 4, 26, w - 8, h - 30, accent);
     }
   } else if (menu_page == MenuPage::About) {
-    if (about_page_idx == 2) {
+    if (about_page_idx == 3) {
       drawAboutPage(d, 0, 0, w, h, accent, about_page_idx);
     } else {
       drawAboutPage(d, 4, 26, w - 8, h - 30, accent, about_page_idx);
@@ -8922,8 +8927,12 @@ void setup() {
   } else {
     nfc_ready = initNfcAtBoot();
   }
+  // [FORK] Kept short on purpose - this is drawn as big centered/watermark
+  // text in a few places (StickS3 home brand, Reader page watermark) with no
+  // wrap handling, and the old "WS1850S (RFID Unit 2)" string overflowed the
+  // line and wrapped messily.
   nfc_module_name = nfc_ready ? String(nfc.deviceName())
-                  : nfc_ws1850s_active ? String("WS1850S (RFID Unit 2)")
+                  : nfc_ws1850s_active ? String("WS1850S")
                   : String("GroveNFC");
   if (nfc_ready) {
     hw_ver = nfc.hardwareVersion();
@@ -9518,7 +9527,7 @@ void loop() {
         refreshDumpFiles(dumps_pick_for_emu);
         drawScreen();
       } else if (menu_page == MenuPage::About) {
-        about_page_idx = (about_page_idx + 1) % 3;
+        about_page_idx = (about_page_idx + 1) % 4;
         drawScreen();
       } else if (menu_page == MenuPage::Diagnose) {
         runDiagnose();
