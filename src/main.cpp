@@ -154,6 +154,9 @@ enum class MenuPage : uint8_t {
   // APP_TARGET_STICKS3 builds (the only target with the WS1850S driver
   // wired up today) - see kHomeOrder below.
   EmvReader,
+  // [FORK] FIDO2/CTAP2-over-NFC recognition dossier, same constraints as
+  // EmvReader (WS1850S/StickS3 only) - see fido2RunFullRead() below.
+  Fido2,
   Count
 };
 
@@ -407,6 +410,24 @@ uint8_t emv_aip_byte = 0;
 String emv_auth_method, emv_crypto, emv_attack_vector, emv_year, emv_risk_label, emv_notes;
 String emv_error;
 
+// [FORK] UI-thread mirror of the latest NfcFido2Result, updated by
+// processFido2Result(). Drawn by the MenuPage::Fido2 branch in drawScreen().
+bool fido2_card_present = false;
+bool fido2_has_result = false;
+bool fido2_select_ok = false;
+bool fido2_getinfo_ok = false;
+bool fido2_read_ok = false;
+String fido2_uid;
+String fido2_vendor;
+String fido2_aaguid_hex;
+String fido2_versions;
+String fido2_extensions;
+bool fido2_rk = false;
+bool fido2_pin_set = false;
+bool fido2_pin_reported = false;
+String fido2_firmware_str;
+String fido2_error;
+
 // ---- NFC Worker Task (Core 0) Infrastructure ----
 // NFC I2C operations run on a dedicated FreeRTOS task on Core 0,
 // so the UI animation loop on Core 1 never blocks on I2C.
@@ -470,6 +491,36 @@ struct NfcEmvResult {
 };
 NfcEmvResult nfc_emv_result;
 
+// [FORK] Result of one FIDO2/CTAP2-over-NFC recognition attempt (RATS ->
+// vendor-string scan -> SELECT FIDO AID -> unauthenticated
+// authenticatorGetInfo), filled by the worker and consumed by
+// processFido2Result(). Same recognition scheme as fido2_test.cpp (and,
+// before that, cybersantana83/fido2-nfc-scanner) - see
+// fido2RunFullRead()/fido2ParseGetInfoInto() below (APP_TARGET_STICKS3).
+struct NfcFido2Result {
+  bool got_card = false;
+  String uid;
+  bool rats_ok = false;
+  bool select_ok = false;    // SELECT (AID FIDO) succeeded - it's a FIDO2/U2F authenticator
+  bool getinfo_ok = false;   // GetInfo CBOR parsed
+  bool read_ok = false;      // full chain completed, dossier fields below are valid
+  String vendor;             // "YubiKey"/"Identiv/uTrust", empty if no ATS string matched
+  String aaguid_hex;
+  String versions;           // space-joined, e.g. "U2F_V2 FIDO_2_0 FIDO_2_1"
+  String extensions;         // space-joined
+  String transports;         // space-joined
+  bool rk = false;
+  bool pin_set = false;
+  bool pin_reported = false; // the "clientPin" option key was present at all
+  uint16_t max_msg_size = 0;
+  byte min_pin_length = 0;
+  uint32_t firmware_version = 0;
+  bool has_firmware_version = false;
+  String error;
+  bool new_result = false;
+};
+NfcFido2Result nfc_fido2_result;
+
 struct NfcHealthResult {
   bool lost_connection = false;
   bool reconnected = false;
@@ -496,6 +547,8 @@ bool nfc_w_is_ndef_page = false;
 bool nfc_w_is_piano_page = false;
 bool nfc_w_is_emv_page = false;
 bool nfc_w_emv_retry = false;  // UI -> worker: force a re-read of the card already on the reader
+bool nfc_w_is_fido2_page = false;
+bool nfc_w_fido2_retry = false;  // UI -> worker: force a re-read of the card already on the reader
 bool nfc_w_card_valid = false;
 bool nfc_w_wifi_popup = false;
 bool nfc_w_in_home = true;
@@ -769,7 +822,7 @@ static void setSpeaker5V(bool enable) {
 // kHomeOrderNfcUnit (ST25R3916 / "M5 Unit NFC") never gets it - that chip
 // doesn't do ISO14443-4 APDUs the way this reader needs.
 #if defined(APP_TARGET_STICKS3)
-const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::EmvReader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
+const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::EmvReader, MenuPage::Fido2, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
 #else
 const MenuPage kHomeOrder[] = {MenuPage::Reader, MenuPage::Emulator, MenuPage::WebFiles, MenuPage::Piano, MenuPage::About};
 #endif
@@ -805,6 +858,7 @@ const char* homePageName(MenuPage page) {
     case MenuPage::About:    return "About";
     case MenuPage::Diagnose: return "Diagnose";
     case MenuPage::EmvReader: return "EMV";
+    case MenuPage::Fido2:    return "FIDO2";
     default:                 return "";
   }
 }
@@ -846,6 +900,13 @@ void drawHomeIconForPage(lgfx::v1::LGFXBase& d, int cx, int cy, MenuPage page, u
     d.fillRect(cx - 18, cy - 13, 36, 26, accent);
     d.fillRect(cx - 14, cy - 9, 28, 18, TFT_BLACK);
     d.fillRect(cx - 10, cy - 5, 10, 8, accent);
+  } else if (page == MenuPage::Fido2) {
+    // Simple security-key glyph: a ring (bow) + shaft + two teeth.
+    d.fillCircle(cx - 10, cy, 9, accent);
+    d.fillCircle(cx - 10, cy, 4, TFT_BLACK);
+    d.fillRect(cx - 2, cy - 3, 16, 6, accent);
+    d.fillRect(cx + 8, cy + 3, 4, 6, accent);
+    d.fillRect(cx + 14, cy + 3, 4, 8, accent);
   }
 }
 
@@ -867,6 +928,8 @@ const char* pageName(MenuPage page) {
       return "About";
     case MenuPage::EmvReader:
       return "EMV";
+    case MenuPage::Fido2:
+      return "FIDO2";
     default:
       return "Unknown";
   }
@@ -5544,6 +5607,7 @@ void drawScreen(bool popup_only) {
   if (menu_page == MenuPage::Piano) accent = TFT_MAGENTA;
   if (menu_page == MenuPage::About) accent = TFT_CYAN;
   if (menu_page == MenuPage::EmvReader) accent = TFT_YELLOW;
+  if (menu_page == MenuPage::Fido2) accent = TFT_BLUE;
   // Unit NFC and GroveNFC share the same color mapping.
 
 #ifdef APP_TARGET_M5PAPER
@@ -5831,6 +5895,7 @@ void drawScreen(bool popup_only) {
     else if (menu_page == MenuPage::Piano) page_title = "Piano";
     else if (menu_page == MenuPage::About) page_title = "About";
     else if (menu_page == MenuPage::EmvReader) page_title = "EMV";
+    else if (menu_page == MenuPage::Fido2) page_title = "FIDO2";
     else page_title = "Diagnose";
     drawHeaderBar(page_title, true);
     if (menu_page == MenuPage::WebFiles && emu_dump_count > 0 && !dumps_pick_for_emu) {
@@ -6011,6 +6076,37 @@ void drawScreen(bool popup_only) {
       } else {
         title = "EMV";
         body = "Aproxime um cartao\nEMV (leitura somente)";
+      }
+      d.setTextColor(accent, TFT_BLACK);
+      d.setCursor(4, content_top + 2);
+      d.print(title);
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, content_top + 20, w - 8, 16, 3, 12, body, TFT_WHITE, TFT_BLACK);
+    } else if (menu_page == MenuPage::Fido2) {
+      // [FORK] FIDO2/CTAP2-over-NFC recognition - see fido2RunFullRead()/
+      // NfcFido2Result. Same sticky-result precedence as EmvReader just
+      // above: fido2_has_result wins over fido2_card_present so the dossier
+      // stays up after the key is lifted, until a fresh query (hold) clears
+      // it. WS1850S only (nfc_ws1850s_active).
+      String title;
+      String body;
+      if (fido2_has_result) {
+        if (!fido2_read_ok) {
+          title = fido2_select_ok ? "Falhou" : "Nao e FIDO2";
+          body = fido2_error + "\nSegure para tentar de novo";
+        } else {
+          title = fido2_vendor.length() ? fido2_vendor : String("FIDO2");
+          body = "AAGUID " + (fido2_aaguid_hex.length() ? fido2_aaguid_hex : String("(n/d)")) + "\n"
+               + "FW " + (fido2_firmware_str.length() ? fido2_firmware_str : String("(n/d)")) + " | PIN "
+               + (fido2_pin_reported ? (fido2_pin_set ? "SET" : "NOT SET") : "(n/d)") + "\n"
+               + fido2_versions;
+        }
+      } else if (fido2_card_present) {
+        title = "Lendo...";
+        body = "UID " + fido2_uid;
+      } else {
+        title = "FIDO2";
+        body = "Aproxime uma chave\nFIDO2/U2F (leitura somente)";
       }
       d.setTextColor(accent, TFT_BLACK);
       d.setCursor(4, content_top + 2);
@@ -7111,6 +7207,22 @@ void enterCurrentFeature() {
     emv_aip_found = false;
     emv_error = "";
     nfc_w_emv_retry = true;
+  } else if (menu_page == MenuPage::Fido2) {
+    fido2_card_present = false;
+    fido2_has_result = false;
+    fido2_select_ok = false;
+    fido2_getinfo_ok = false;
+    fido2_read_ok = false;
+    fido2_uid = "";
+    fido2_vendor = "";
+    fido2_aaguid_hex = "";
+    fido2_versions = "";
+    fido2_extensions = "";
+    fido2_pin_set = false;
+    fido2_pin_reported = false;
+    fido2_firmware_str = "";
+    fido2_error = "";
+    nfc_w_fido2_retry = true;
   }
 
   drawScreen();
@@ -7155,6 +7267,24 @@ void enterMenu(MenuPage mode) {
     emv_aip_found = false;
     emv_error = "";
     nfc_w_emv_retry = true;
+  }
+
+  if (menu_page == MenuPage::Fido2) {
+    fido2_card_present = false;
+    fido2_has_result = false;
+    fido2_select_ok = false;
+    fido2_getinfo_ok = false;
+    fido2_read_ok = false;
+    fido2_uid = "";
+    fido2_vendor = "";
+    fido2_aaguid_hex = "";
+    fido2_versions = "";
+    fido2_extensions = "";
+    fido2_pin_set = false;
+    fido2_pin_reported = false;
+    fido2_firmware_str = "";
+    fido2_error = "";
+    nfc_w_fido2_retry = true;
   }
 
   if (menu_page == MenuPage::Emulator && nfc_ready) {
@@ -7615,7 +7745,16 @@ const char* emvPcbBlockType(byte pcb) {
 // I-block chaining per ISO/IEC 14443-4 - see emv_test.cpp::sendIBlock() for
 // the full rationale (same logic, just renamed to avoid clashing with that
 // standalone sketch's own copy, which stays excluded from this build).
-bool emvSendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte respCapacity) {
+//
+// [FORK] respLen/respCapacity are uint16_t, not byte: found the hard way on
+// fido2_test.cpp's own copy of this logic (same bug class) that a real
+// YubiKey 5's unauthenticated CTAP2 GetInfo response runs past 255 bytes
+// once reassembled via I-block chaining - byte-sized lengths here would
+// both cap the buffer too low and silently wrap past 256. Widened here too
+// since this same function is reused for the FIDO2 page's GetInfo
+// (emvRunFido2Read()) - EMV's own GPO/PPSE responses stay well under 256
+// bytes today, so this is a no-op for the existing EMV path.
+bool emvSendIBlock(byte* apdu, byte apduLen, byte* respOut, uint16_t& respLen, uint16_t respCapacity) {
   byte frame[64];
   frame[0] = 0x02;  // I-block, block number 0, no chaining
   memcpy(frame + 1, apdu, apduLen);
@@ -7643,7 +7782,7 @@ bool emvSendIBlock(byte* apdu, byte apduLen, byte* respOut, byte& respLen, byte 
     }
 
     if ((pcb & 0xC0) == 0x00) {
-      byte chunkLen = backLen - 3;  // strip PCB(1) + trailing CRC_A(2)
+      uint16_t chunkLen = (uint16_t)backLen - 3;  // strip PCB(1) + trailing CRC_A(2)
       if (respLen + chunkLen > respCapacity) {
         Serial.println("[EMV] Response exceeds buffer capacity, aborting");
         return false;
@@ -7762,7 +7901,7 @@ void emvRunFullRead(NfcEmvResult& er) {
     0x00
   };
   byte resp[200];
-  byte respLen = 0;
+  uint16_t respLen = 0;
   if (!emvSendIBlock(selectPPSE, sizeof(selectPPSE), resp, respLen, sizeof(resp))) {
     er.error = "SELECT PPSE sem resposta";
     return;
@@ -7853,7 +7992,7 @@ void emvRunFullRead(NfcEmvResult& er) {
   selectAID[5 + candidates[chosen].aidLen] = 0x00;
   byte selCmdLen = 6 + candidates[chosen].aidLen;
 
-  byte selResp[200]; byte selRespLen = 0;
+  byte selResp[200]; uint16_t selRespLen = 0;
   if (!emvSendIBlock(selectAID, selCmdLen, selResp, selRespLen, sizeof(selResp))) {
     er.error = "SELECT AID sem resposta";
     return;
@@ -7883,7 +8022,7 @@ void emvRunFullRead(NfcEmvResult& er) {
   byte gpoCmdLen = 7 + pdolLen;
   gpo[gpoCmdLen++] = 0x00;
 
-  byte gpoResp[200]; byte gpoRespLen = 0;
+  byte gpoResp[200]; uint16_t gpoRespLen = 0;
   if (!emvSendIBlock(gpo, gpoCmdLen, gpoResp, gpoRespLen, sizeof(gpoResp))) {
     er.error = "GPO sem resposta";
     return;
@@ -7931,6 +8070,389 @@ void emvRunFullRead(NfcEmvResult& er) {
   Serial.printf("[EMV][MAIN] %s PAN=%s AIP=0x%02X risk=%s\n",
                 er.brand.c_str(), er.pan.length() ? er.pan.c_str() : "(n/d)",
                 er.aip_byte, er.risk_label.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// [FORK] FIDO2/CTAP2-over-NFC recognition, MenuPage::Fido2 (WS1850S/StickS3
+// only, same as EmvReader). Ported from src/fido2_test.cpp's own CBOR
+// parser/vendor-string detection (same scheme as cybersantana83's
+// fido2-nfc-scanner Flipper FAP - see that file's header comment for the
+// full backstory), reusing emvDoRATS()/emvSendIBlock()/emvSetPcdTimeoutMs()
+// instead of a separate copy - unlike the standalone test sketches, which
+// are deliberately independent of each other, main.cpp's EMV and FIDO2
+// pages already share the same WS1850S object and the same "ISO14443-4
+// APDU exchange" primitive, so there's no reason to duplicate it twice
+// inside this file.
+const byte kFidoAid[] = {0xA0, 0x00, 0x00, 0x06, 0x47, 0x2F, 0x00, 0x01};
+
+struct Fido2CborCursor {
+  const byte* data;
+  uint16_t pos;
+  uint16_t len;
+};
+
+static const byte kFido2CborUint = 0x00;
+static const byte kFido2CborNegint = 0x20;
+static const byte kFido2CborBytes = 0x40;
+static const byte kFido2CborText = 0x60;
+static const byte kFido2CborArray = 0x80;
+static const byte kFido2CborMap = 0xA0;
+static const byte kFido2CborSimple = 0xE0;
+static const byte kFido2CborTrue = 0xF5;
+static const byte kFido2CborFalse = 0xF4;
+
+static bool fido2CborReadByte(Fido2CborCursor& c, byte& out) {
+  if (c.pos >= c.len) return false;
+  out = c.data[c.pos++];
+  return true;
+}
+
+static bool fido2CborReadUint(Fido2CborCursor& c, byte info, uint64_t& out) {
+  if (info <= 23) { out = info; return true; }
+  if (info == 24) {
+    byte v;
+    if (!fido2CborReadByte(c, v)) return false;
+    out = v;
+    return true;
+  }
+  if (info == 25) {
+    byte hi, lo;
+    if (!fido2CborReadByte(c, hi) || !fido2CborReadByte(c, lo)) return false;
+    out = ((uint16_t)hi << 8) | lo;
+    return true;
+  }
+  if (info == 26) {
+    byte b[4];
+    for (int i = 0; i < 4; i++) {
+      if (!fido2CborReadByte(c, b[i])) return false;
+    }
+    out = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+    return true;
+  }
+  return false;
+}
+
+static bool fido2CborSkip(Fido2CborCursor& c, int depth) {
+  if (depth > 8) return false;
+  byte b;
+  if (!fido2CborReadByte(c, b)) return false;
+  byte major = b & 0xE0;
+  byte info = b & 0x1F;
+  uint64_t n = 0;
+  if (!fido2CborReadUint(c, info, n)) return false;
+  if (major == kFido2CborUint || major == kFido2CborNegint) return true;
+  if (major == kFido2CborSimple) return true;
+  if (major == kFido2CborBytes || major == kFido2CborText) {
+    c.pos += (uint16_t)n;
+    return c.pos <= c.len;
+  }
+  if (major == kFido2CborArray) {
+    for (uint64_t i = 0; i < n; i++) {
+      if (!fido2CborSkip(c, depth + 1)) return false;
+    }
+    return true;
+  }
+  if (major == kFido2CborMap) {
+    for (uint64_t i = 0; i < n * 2; i++) {
+      if (!fido2CborSkip(c, depth + 1)) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool fido2CborReadText(Fido2CborCursor& c, char* buf, size_t buflen) {
+  byte b;
+  if (!fido2CborReadByte(c, b)) return false;
+  if ((b & 0xE0) != kFido2CborText) return false;
+  uint64_t n;
+  if (!fido2CborReadUint(c, b & 0x1F, n)) return false;
+  if (n >= buflen || c.pos + n > c.len) return false;
+  memcpy(buf, c.data + c.pos, n);
+  buf[n] = '\0';
+  c.pos += (uint16_t)n;
+  return true;
+}
+
+static bool fido2CborReadBytes(Fido2CborCursor& c, byte* buf, size_t buflen, uint16_t& outLen) {
+  byte b;
+  if (!fido2CborReadByte(c, b)) return false;
+  if ((b & 0xE0) != kFido2CborBytes) return false;
+  uint64_t n;
+  if (!fido2CborReadUint(c, b & 0x1F, n)) return false;
+  if (n > buflen || c.pos + n > c.len) return false;
+  memcpy(buf, c.data + c.pos, n);
+  outLen = (uint16_t)n;
+  c.pos += (uint16_t)n;
+  return true;
+}
+
+// Reads a CBOR array of text strings and joins them into `out` space-
+// separated (main.cpp's dossier is a single String per field, unlike
+// fido2_test.cpp's fixed char[][] arrays - joining up front is simpler for
+// a UI label).
+static void fido2CborJoinStringArray(Fido2CborCursor& c, String& out, byte maxCount) {
+  byte b;
+  if (!fido2CborReadByte(c, b)) return;
+  if ((b & 0xE0) != kFido2CborArray) return;
+  uint64_t n;
+  if (!fido2CborReadUint(c, b & 0x1F, n)) return;
+  byte taken = 0;
+  for (uint64_t i = 0; i < n; i++) {
+    char tmp[24] = {0};
+    if (taken < maxCount && fido2CborReadText(c, tmp, sizeof(tmp))) {
+      if (out.length()) out += " ";
+      out += tmp;
+      taken++;
+    } else {
+      fido2CborSkip(c, 0);
+    }
+  }
+}
+
+struct Fido2OptionsFlags {
+  bool rk = false;
+  bool client_pin = false;
+  bool client_pin_present = false;  // CTAP2 omits this key entirely on some U2F-only fallbacks
+  bool large_blobs = false;
+  bool always_uv = false;
+  bool plat = false;
+};
+
+static void fido2CborParseOptionsMap(Fido2CborCursor& c, Fido2OptionsFlags& opt) {
+  byte b;
+  if (!fido2CborReadByte(c, b)) return;
+  if ((b & 0xE0) != kFido2CborMap) return;
+  uint64_t n;
+  if (!fido2CborReadUint(c, b & 0x1F, n)) return;
+  for (uint64_t i = 0; i < n; i++) {
+    char key[24] = {0};
+    if (!fido2CborReadText(c, key, sizeof(key))) {
+      fido2CborSkip(c, 0);
+      fido2CborSkip(c, 0);
+      continue;
+    }
+    if (c.pos >= c.len) break;
+    byte peek = c.data[c.pos];
+    if (peek == kFido2CborTrue || peek == kFido2CborFalse) {
+      c.pos++;
+      bool v = (peek == kFido2CborTrue);
+      if (strcmp(key, "rk") == 0) opt.rk = v;
+      else if (strcmp(key, "clientPin") == 0) { opt.client_pin = v; opt.client_pin_present = true; }
+      else if (strcmp(key, "largeBlobs") == 0) opt.large_blobs = v;
+      else if (strcmp(key, "alwaysUv") == 0) opt.always_uv = v;
+      else if (strcmp(key, "plat") == 0) opt.plat = v;
+    } else {
+      fido2CborSkip(c, 0);
+    }
+  }
+}
+
+// Parses the unauthenticated CTAP2 authenticatorGetInfo map straight into
+// NfcFido2Result's fields (`data`/`len` already has the leading CTAP2
+// status byte stripped). Same key layout as fido2_test.cpp's
+// fido2CborParseGetInfo()/cbor_parser.c.
+bool fido2ParseGetInfoInto(const byte* data, uint16_t len, NfcFido2Result& fr) {
+  Fido2CborCursor c{data, 0, len};
+  byte b;
+  if (!fido2CborReadByte(c, b)) return false;
+  if ((b & 0xE0) != kFido2CborMap) return false;
+  uint64_t mapCount;
+  if (!fido2CborReadUint(c, b & 0x1F, mapCount)) return false;
+
+  Fido2OptionsFlags opt;
+  byte aaguid[16] = {0};
+  bool has_aaguid = false;
+
+  for (uint64_t i = 0; i < mapCount && c.pos < c.len; i++) {
+    byte kb;
+    if (!fido2CborReadByte(c, kb)) break;
+    uint64_t key;
+    if (!fido2CborReadUint(c, kb & 0x1F, key)) break;
+
+    switch (key) {
+      case 0x01:
+        fido2CborJoinStringArray(c, fr.versions, 4);
+        break;
+      case 0x02:
+        fido2CborJoinStringArray(c, fr.extensions, 8);
+        break;
+      case 0x03: {
+        uint16_t alen = 0;
+        if (fido2CborReadBytes(c, aaguid, sizeof(aaguid), alen)) has_aaguid = (alen == sizeof(aaguid));
+        break;
+      }
+      case 0x04:
+        fido2CborParseOptionsMap(c, opt);
+        break;
+      case 0x05: {
+        byte vb; fido2CborReadByte(c, vb);
+        uint64_t v; fido2CborReadUint(c, vb & 0x1F, v);
+        fr.max_msg_size = (uint16_t)v;
+        break;
+      }
+      case 0x09:
+        fido2CborJoinStringArray(c, fr.transports, 4);
+        break;
+      case 0x0D: {
+        byte vb; fido2CborReadByte(c, vb);
+        uint64_t v; fido2CborReadUint(c, vb & 0x1F, v);
+        fr.min_pin_length = (byte)v;
+        break;
+      }
+      case 0x0E: {
+        byte vb; fido2CborReadByte(c, vb);
+        uint64_t v; fido2CborReadUint(c, vb & 0x1F, v);
+        fr.firmware_version = (uint32_t)v;
+        fr.has_firmware_version = true;
+        break;
+      }
+      default:
+        fido2CborSkip(c, 0);
+        break;
+    }
+  }
+
+  if (has_aaguid) {
+    char hex[40];
+    snprintf(hex, sizeof(hex), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+              aaguid[0], aaguid[1], aaguid[2], aaguid[3], aaguid[4], aaguid[5], aaguid[6], aaguid[7],
+              aaguid[8], aaguid[9], aaguid[10], aaguid[11], aaguid[12], aaguid[13], aaguid[14], aaguid[15]);
+    fr.aaguid_hex = hex;
+  }
+  fr.rk = opt.rk;
+  fr.pin_set = opt.client_pin_present && opt.client_pin;
+  fr.pin_reported = opt.client_pin_present;
+  return true;
+}
+
+// Same vendor-string scan as fido2_test.cpp's detectVendorString() - matches
+// anywhere in the raw ATS bytes rather than exactly isolating the ISO7816
+// historical-bytes window (good enough for recognition, not a conformance
+// check). emvDoRATS() doesn't hand back the ATS bytes today (EMV never
+// needed them), so this sketch does its own minimal RATS exchange instead
+// of calling emvDoRATS() - everything past RATS (SELECT/I-block chaining)
+// still goes through the shared emvSendIBlock().
+bool fido2DoRatsAndDetectVendor(NfcFido2Result& fr) {
+  byte cmd[4] = {0xE0, 0x50};
+  byte cmdLen = 2;
+  if (!emvAppendCRC(cmd, cmdLen)) return false;
+  byte back[64];
+  byte backLen = sizeof(back);
+  byte status = mfrc522_ws1850s.PCD_TransceiveData(cmd, cmdLen, back, &backLen, NULL, 0, true);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  static const struct { const char* name; const char* needle; } kVendors[] = {
+      {"YubiKey", "YubiKey"},
+      {"Identiv/uTrust", "uTrust"},
+  };
+  for (const auto& v : kVendors) {
+    byte needleLen = (byte)strlen(v.needle);
+    for (byte i = 0; i + needleLen <= backLen; i++) {
+      if (memcmp(back + i, v.needle, needleLen) == 0) {
+        fr.vendor = v.name;
+        break;
+      }
+    }
+    if (fr.vendor.length()) break;
+  }
+  return true;
+}
+
+// [FORK] SELECT the FIDO applet, then one unauthenticated CTAP2
+// authenticatorGetInfo, with GET RESPONSE (61 XX) chaining on top of the
+// I-block chaining emvSendIBlock() already handles - same two-layer scheme
+// as fido2_test.cpp::tryGetInfo()/trySelectFido(), ported to fill `fr`
+// instead of printing to Serial.
+void fido2RunFullRead(NfcFido2Result& fr) {
+  if (!fido2DoRatsAndDetectVendor(fr)) { fr.error = "RATS falhou"; return; }
+  fr.rats_ok = true;
+  emvSetPcdTimeoutMs(150);
+
+  byte selectFido[13];
+  selectFido[0] = 0x00;
+  selectFido[1] = 0xA4;
+  selectFido[2] = 0x04;
+  selectFido[3] = 0x00;
+  selectFido[4] = sizeof(kFidoAid);
+  memcpy(selectFido + 5, kFidoAid, sizeof(kFidoAid));
+  selectFido[5 + sizeof(kFidoAid)] = 0x00;
+  byte selCmdLen = 6 + sizeof(kFidoAid);
+
+  byte selResp[64];
+  uint16_t selRespLen = 0;
+  if (!emvSendIBlock(selectFido, selCmdLen, selResp, selRespLen, sizeof(selResp))) {
+    fr.error = "SELECT (AID FIDO) sem resposta - nao e FIDO2/U2F?";
+    return;
+  }
+  if (selRespLen < 2 || selResp[selRespLen - 2] != 0x90 || selResp[selRespLen - 1] != 0x00) {
+    fr.error = "SELECT (AID FIDO) rejeitado - nao e FIDO2/U2F?";
+    return;
+  }
+  fr.select_ok = true;
+
+  // kRespCapacity/kFullCapacity: a real YubiKey 5's GetInfo (long
+  // versions/extensions/algorithms lists) runs past 255 bytes once
+  // reassembled - see the comment on emvSendIBlock() above. Same 512/600
+  // headroom as fido2_test.cpp after the hardware-found overflow fix.
+  constexpr uint16_t kRespCapacity = 512;
+  constexpr uint16_t kFullCapacity = 600;
+
+  byte getInfo[] = {0x80, 0x10, 0x80, 0x00, 0x01, 0x04, 0x00};
+  byte resp[kRespCapacity];
+  uint16_t respLen = 0;
+  if (!emvSendIBlock(getInfo, sizeof(getInfo), resp, respLen, kRespCapacity)) {
+    fr.error = "authenticatorGetInfo sem resposta";
+    return;
+  }
+
+  byte full[kFullCapacity];
+  uint16_t fullLen = respLen;
+  memcpy(full, resp, respLen);
+
+  while (fullLen >= 2 && full[fullLen - 2] == 0x61) {
+    byte more = full[fullLen - 1];
+    fullLen -= 2;
+    byte getResp[] = {0x00, 0xC0, 0x00, 0x00, more};
+    byte chunk[kRespCapacity];
+    uint16_t chunkLen = 0;
+    if (!emvSendIBlock(getResp, sizeof(getResp), chunk, chunkLen, kRespCapacity)) {
+      fr.error = "GET RESPONSE falhou no meio do chaining";
+      return;
+    }
+    if (fullLen + chunkLen > kFullCapacity) {
+      fr.error = "GetInfo maior que o buffer";
+      return;
+    }
+    memcpy(full + fullLen, chunk, chunkLen);
+    fullLen += chunkLen;
+  }
+
+  if (fullLen < 2 || full[fullLen - 2] != 0x90 || full[fullLen - 1] != 0x00) {
+    fr.error = "authenticatorGetInfo recusado";
+    return;
+  }
+
+  uint16_t dataLen = fullLen - 2;
+  if (dataLen < 1 || full[0] != 0x00) {
+    fr.error = "CTAP2 status != OK";
+    return;
+  }
+
+  if (!fido2ParseGetInfoInto(full + 1, dataLen - 1, fr)) {
+    fr.error = "CBOR do GetInfo nao pode ser lido";
+    return;
+  }
+  fr.getinfo_ok = true;
+  fr.read_ok = true;
+  String fwLogStr = fr.has_firmware_version
+      ? (String((fr.firmware_version >> 16) & 0xFF) + "." + String((fr.firmware_version >> 8) & 0xFF) +
+         "." + String(fr.firmware_version & 0xFF))
+      : String("(n/d)");
+  Serial.printf("[FIDO2][MAIN] vendor=%s aaguid=%s fw=%s pin_set=%d\n",
+                fr.vendor.length() ? fr.vendor.c_str() : "(?)",
+                fr.aaguid_hex.length() ? fr.aaguid_hex.c_str() : "(n/d)",
+                fwLogStr.c_str(), fr.pin_set);
 }
 #endif
 
@@ -8099,6 +8621,8 @@ void nfcWorkerTask(void* /*param*/) {
 #if defined(APP_TARGET_STICKS3)
   uint32_t w_last_emv_poll_ms = 0;
   String w_emv_last_uid;  // only re-run the full APDU chain when the UID changes
+  uint32_t w_last_fido2_poll_ms = 0;
+  String w_fido2_last_uid;
 #endif
 
   for (;;) {
@@ -8393,6 +8917,51 @@ void nfcWorkerTask(void* /*param*/) {
         }
       }
     }
+
+    // --- handleFido2Reader (periodic FIDO2 recognition attempt) ---
+    // Same shape as handleEmvReader just above - WS1850S only, re-reads the
+    // full chain only on a new UID or an explicit retry, since GetInfo can
+    // take a couple seconds (lots of WTX rounds on a real YubiKey 5).
+    if (nfc_ws1850s_active && !w_in_home && nfc_w_is_fido2_page) {
+      if (now - w_last_fido2_poll_ms >= kPollIntervalMs) {
+        w_last_fido2_poll_ms = now;
+        if (xSemaphoreTake(nfc_mutex, pdMS_TO_TICKS(3000)) == pdTRUE) {
+          byte bufferATQA[2];
+          byte bufferSize = sizeof(bufferATQA);
+          byte wakeupStatus = mfrc522_ws1850s.PICC_WakeupA(bufferATQA, &bufferSize);
+          bool got_uid = false;
+          String uid;
+          if (wakeupStatus == MFRC522::STATUS_OK || wakeupStatus == MFRC522::STATUS_COLLISION) {
+            if (mfrc522_ws1850s.PICC_ReadCardSerial()) {
+              got_uid = true;
+              for (byte i = 0; i < mfrc522_ws1850s.uid.size; i++) {
+                char buf[3];
+                snprintf(buf, sizeof(buf), "%02X", mfrc522_ws1850s.uid.uidByte[i]);
+                uid += buf;
+              }
+            }
+          }
+          if (!got_uid) {
+            w_fido2_last_uid = "";
+            NfcFido2Result fr;
+            fr.got_card = false;
+            fr.new_result = true;
+            nfc_fido2_result = fr;
+          } else if (uid != w_fido2_last_uid || nfc_w_fido2_retry) {
+            w_fido2_last_uid = uid;
+            nfc_w_fido2_retry = false;
+            NfcFido2Result fr;
+            fr.got_card = true;
+            fr.uid = uid;
+            fido2RunFullRead(fr);
+            fr.new_result = true;
+            nfc_fido2_result = fr;
+            mfrc522_ws1850s.PICC_HaltA();
+          }
+          xSemaphoreGive(nfc_mutex);
+        }
+      }
+    }
 #endif
 
     // --- autoScanNdef (periodic NDEF poll) ---
@@ -8623,6 +9192,45 @@ void processEmvResult() {
   emv_risk_label = r.risk_label;
   emv_notes = r.notes;
   emv_error = r.error;
+  if (r.read_ok) playSuccessTone();
+  drawScreen();
+}
+
+// UI-side: process FIDO2 recognition result from NFC worker
+void processFido2Result() {
+  if (!nfc_fido2_result.new_result) return;
+  NfcFido2Result r = nfc_fido2_result;
+  nfc_fido2_result.new_result = false;
+
+  fido2_card_present = r.got_card;
+  if (!r.got_card) {
+    // [FORK] Sticky result, same spirit as processEmvResult()/
+    // reader_display_card: don't clear fido2_has_result/the dossier fields
+    // just because the key left the field (and its anticollision UID
+    // rotates on every approach anyway, by design, for privacy - see
+    // fido2_test.cpp's header comment). Only fido2_card_present (live)
+    // tracks real-time presence.
+    drawScreen();
+    return;
+  }
+
+  fido2_has_result = true;
+  fido2_uid = r.uid;
+  fido2_select_ok = r.select_ok;
+  fido2_getinfo_ok = r.getinfo_ok;
+  fido2_read_ok = r.read_ok;
+  fido2_vendor = r.vendor;
+  fido2_aaguid_hex = r.aaguid_hex;
+  fido2_versions = r.versions;
+  fido2_extensions = r.extensions;
+  fido2_rk = r.rk;
+  fido2_pin_set = r.pin_set;
+  fido2_pin_reported = r.pin_reported;
+  fido2_firmware_str = r.has_firmware_version
+      ? (String((r.firmware_version >> 16) & 0xFF) + "." + String((r.firmware_version >> 8) & 0xFF) +
+         "." + String(r.firmware_version & 0xFF))
+      : String("");
+  fido2_error = r.error;
   if (r.read_ok) playSuccessTone();
   drawScreen();
 }
@@ -9027,6 +9635,7 @@ void loop() {
   nfc_w_is_ndef_page = (!in_home && menu_page == MenuPage::ReadNDEF);
   nfc_w_is_piano_page = (!in_home && menu_page == MenuPage::Piano);
   nfc_w_is_emv_page = (!in_home && menu_page == MenuPage::EmvReader);
+  nfc_w_is_fido2_page = (!in_home && menu_page == MenuPage::Fido2);
   nfc_w_reader_14b_only = reader_14b_only;
   nfc_w_card_valid = last_card.valid;
   nfc_w_wifi_popup = wifi_popup;
@@ -9544,7 +10153,8 @@ void loop() {
     // doesn't get the dossier/EMV UI anyway.
 #ifndef APP_TARGET_ATOMS3
     const bool hold_is_retry =
-        hold_go_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::EmvReader);
+        hold_go_home && (menu_page == MenuPage::Reader || menu_page == MenuPage::EmvReader ||
+                          menu_page == MenuPage::Fido2);
 #else
     const bool hold_is_retry = false;
 #endif
@@ -9561,10 +10171,14 @@ void loop() {
         reader_fail_streak = 0;
         reader_need_first_tone = true;
         last_poll_ms = 0;
-      } else {
+      } else if (menu_page == MenuPage::EmvReader) {
         emv_has_result = false;
         emv_error = "";
         nfc_w_emv_retry = true;
+      } else {
+        fido2_has_result = false;
+        fido2_error = "";
+        nfc_w_fido2_retry = true;
       }
       drawScreen();
     } else if (hold_go_home || nav_back) {
@@ -9583,6 +10197,8 @@ void loop() {
     processPianoResult();
   } else if (menu_page == MenuPage::EmvReader && !in_home) {
     processEmvResult();
+  } else if (menu_page == MenuPage::Fido2 && !in_home) {
+    processFido2Result();
   }
 
   delay(reader_anim_active ? 1 : 10);

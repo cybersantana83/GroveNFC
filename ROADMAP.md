@@ -286,6 +286,27 @@ aplicação em vez de por chip.
         (`sendIBlock()`/`tryGetInfo()`/`printHex()`) e os buffers foram
         pra 512/600 bytes (mesma margem do `FIDO2_MAX_RESPONSE` do
         `fido2-nfc-scanner`).
+      - **Atualização — integrado no firmware principal, com tela
+        própria** (`MenuPage::Fido2`): mesmo padrão da `MenuPage::EmvReader`
+        (worker no Core 0 faz RATS → vendor-string scan → SELECT AID
+        FIDO → `GetInfo`, a UI no Core 1 só lê o resultado). Reaproveita
+        `emvDoRATS()`/`emvSendIBlock()`/`emvSetPcdTimeoutMs()` em vez de
+        duplicar a lógica de transporte (ao contrário dos sketches
+        isolados, que são deliberadamente independentes entre si,
+        `main.cpp` já tem EMV e FIDO2 na mesma `MFRC522 mfrc522_ws1850s`,
+        então reusar o `sendIBlock()` genérico faz sentido). O parser de
+        CBOR (`fido2ParseGetInfoInto()`) e a detecção de vendor string
+        (`fido2DoRatsAndDetectVendor()`) são portes diretos de
+        `fido2_test.cpp`, só que escrevendo em `NfcFido2Result` (Strings
+        já concatenadas) em vez de `char[][24]` fixos. `emvSendIBlock()`
+        também foi alargado de `byte` pra `uint16_t` (mesma correção do
+        item acima) já que agora é compartilhado com o `GetInfo` do
+        FIDO2 — não muda nada pro EMV, cujas respostas GPO/PPSE já
+        ficam bem abaixo de 256 bytes. Resultado é **sticky** (mesma
+        lógica do EmvReader): o dossiê fica na tela depois que a chave
+        sai do campo; segurar o botão força nova consulta. Só no
+        M5StickS3 (WS1850S), como o EMV — excluído de
+        `kHomeOrderNfcUnit`.
 - [x] **Integrar o leitor EMV no firmware principal** — portado de
       `src/emv_test.cpp` pra uma página nova em `main.cpp`
       (`MenuPage::EmvReader`), seguindo o mesmo padrão Core-0/Core-1 do
