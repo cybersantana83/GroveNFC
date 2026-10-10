@@ -5936,20 +5936,26 @@ void drawScreen(bool popup_only) {
       // reader - cards_db is keyed only by the protocol code string both
       // backends (ST25R3916/"Unit NFC" and the WS1850S secondary driver)
       // already produce, so this works regardless of which chip is active.
-      const int card_area_h = last_card.valid ? (content_h * 3) / 5 : content_h - 4;
+      //
+      // Anchored from the BOTTOM of the content area, working backward, so
+      // the dossier text can never land past the boundary the plain pixel
+      // card already respected - a fixed pixel budget carved out of the
+      // bottom, not "wherever the card visual happens to end up".
+      const int content_bottom = content_top + 2 + content_h - 4;
+      const int dossier_h = last_card.valid ? 44 : 0;
+      const int card_area_h = (content_h - 4) - dossier_h;
       drawReaderPixelCard(d, 4, content_top + 2, w - 8, card_area_h, accent, last_card, reader_14b_only);
       if (last_card.valid) {
-        const int dossier_y = content_top + 2 + card_area_h + 2;
-        const int dossier_h = (content_top + 2 + content_h - 4) - dossier_y;
+        const int dossier_y = content_bottom - dossier_h;
         d.fillRect(4, dossier_y, w - 8, dossier_h, TFT_BLACK);
         const CardProfile* p = cardsDbFind(last_card.protocol);
         String dossier = p
             ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
             : String("(sem perfil em cards_db)");
         d.setFont(&fonts::Font0);
-        d.setTextSize(2);
+        d.setTextSize(1);
         d.setTextColor(TFT_WHITE, TFT_BLACK);
-        drawWrappedText(d, 4, dossier_y, w - 8, 16, 3, 12, dossier, TFT_WHITE, TFT_BLACK);
+        drawWrappedText(d, 4, dossier_y, w - 8, 11, 4, 6, dossier, TFT_WHITE, TFT_BLACK);
       }
     } else if (menu_page == MenuPage::ReadNDEF) {
       String title = "Scanning";
@@ -6532,21 +6538,25 @@ void drawScreen(bool popup_only) {
     // text here rather than risk it overflowing an un-testable layout.
     drawReaderPixelCard(d, 4, 26, w - 8, h - 30, accent, last_card, reader_14b_only);
 #else
+    // Same bottom-anchored construction as the StickS3/StickCPlus block
+    // above: carve a fixed pixel budget out of the bottom of the content
+    // area for the dossier, give the rest to the card visual - never past
+    // the boundary the plain pixel card already respected.
     const int full_h = h - 30;
-    const int card_h2 = last_card.valid ? (full_h * 3) / 5 : full_h;
+    const int dossier_h2 = last_card.valid ? 44 : 0;
+    const int card_h2 = full_h - dossier_h2;
     drawReaderPixelCard(d, 4, 26, w - 8, card_h2, accent, last_card, reader_14b_only);
     if (last_card.valid) {
-      const int dossier_y = 26 + card_h2 + 2;
-      const int dossier_h = (26 + full_h) - dossier_y;
-      d.fillRect(4, dossier_y, w - 8, dossier_h, TFT_BLACK);
+      const int dossier_y = 26 + card_h2;
+      d.fillRect(4, dossier_y, w - 8, dossier_h2, TFT_BLACK);
       const CardProfile* p = cardsDbFind(last_card.protocol);
       String dossier = p
           ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
           : String("(sem perfil em cards_db)");
       d.setFont(&fonts::Font0);
-      d.setTextSize(2);
+      d.setTextSize(1);
       d.setTextColor(TFT_WHITE, TFT_BLACK);
-      drawWrappedText(d, 4, dossier_y, w - 8, 16, 3, 12, dossier, TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, dossier_y, w - 8, 11, 4, 6, dossier, TFT_WHITE, TFT_BLACK);
     }
 #endif
   } else if (menu_page == MenuPage::ReadNDEF) {
