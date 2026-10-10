@@ -800,13 +800,17 @@ const MenuPage kHomeOrderNfcUnit[] = {MenuPage::Reader, MenuPage::Emulator, Menu
 inline bool isNfcUnitMode() { return nfc_module_name == "M5 Unit NFC"; }
 
 // [FORK] Display-only relabel: nfc_module_name itself ("GroveNFC" / "M5 Unit
-// NFC") stays untouched because isNfcUnitMode()/isEmuTypeSupportedCurrentMode()
-// above key off those exact strings coming from GroveNFC::deviceName(). This
-// just maps them to the names the boards are actually sold/known as whenever
-// we print the detected module on screen (home brand, status bar, boot line).
+// NFC" / "WS1850S") stays untouched because isNfcUnitMode()/
+// isEmuTypeSupportedCurrentMode() above key off the exact "M5 Unit NFC"
+// string coming from GroveNFC::deviceName(). This just maps the detected
+// module to its commercial M5Stack name wherever we print it on screen
+// (home brand, status bar, boot line): the "M5 Unit NFC" -> "NFC", and the
+// WS1850S-based secondary reader -> "RFID 2" (M5Stack's own "RFID 2 Unit").
+// GroveNFC (the project's original CR95HF-based primary module) keeps its
+// own name as-is - it isn't the M5Stack "RFID 2" unit.
 inline String displayModuleName(const String& name) {
   if (name == "M5 Unit NFC") return "NFC";
-  if (name == "GroveNFC") return "RFID 2";
+  if (name == "WS1850S") return "RFID 2";
   return name;
 }
 inline bool isEmuTypeSupportedCurrentMode(EmuType type) {
@@ -4239,7 +4243,8 @@ void drawAboutPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
     d.setCursor(x + 2, ty); d.print("IIC Hardware"); ty += line_h;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
     d.setCursor(x + 2 + indent, ty); d.print("NFC (M5 Unit)"); ty += line_h;
-    d.setCursor(x + 2 + indent, ty); d.print("RFID 2 (GroveNFC)"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("GroveNFC"); ty += line_h;
+    d.setCursor(x + 2 + indent, ty); d.print("RFID 2 (WS1850S)"); ty += line_h;
   } else if (page_idx == 1) {
     int ty = y + 4;
     d.setTextColor(accent, TFT_BLACK);
@@ -5566,9 +5571,13 @@ void drawScreen(bool popup_only) {
       }
 
       if (!boot_notice_line.isEmpty()) {
+        // [FORK] Was pinned at h-24, which collided with the page-name label
+        // drawn at h-20 (same size2 text, overlapping baselines). There's a
+        // clear gap between the brand text (y=4..20) and the icon box (which
+        // starts well into content_h), so draw it there instead.
         d.setTextSize(1);
         d.setTextColor(TFT_RED, TFT_BLACK);
-        d.setCursor(4, h - 24);
+        d.setCursor(4, content_top + 2);
         d.print(boot_notice_line);
       }
 #ifdef APP_TARGET_M5PAPER
