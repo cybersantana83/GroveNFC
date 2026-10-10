@@ -182,6 +182,17 @@ aplicação em vez de por chip.
       lê (FeliCa, ISO15693, ISO14443B, DESFire) ainda não foram testados
       com hardware real nesse dossiê — só portados da tabela do ChaosID.
 
+      **Atualização**: portado também pra tela real do `main.cpp`
+      (página `Reader`, não só o sketch isolado) — card.protocol já é a
+      mesma string em qualquer um dos dois backends, então o dossiê
+      funciona igual com `ST25R3916`/"Unit NFC" ou com o driver
+      secundário WS1850S, sem depender de ISO14443-4/APDU como o EMV
+      precisa. Reduz a área do `drawReaderPixelCard()` (que já existia)
+      pra metade de cima quando tem cartão, e desenha uso típico /
+      criptografia / vetor de ataque + risco embaixo. Fora do AtomS3 (tela
+      quadrada pequena, sem espaço sobrando — fica só com UID/tipo, como
+      antes).
+
       **Por que foi bem mais trabalhoso que o Reader normal**: cartões EMV
       usam ISO14443-4 (camada 4, com APDUs), que a `MFRC522-I2C-Library`
       não implementa nativamente (só camada 3, tipo MIFARE). Construímos

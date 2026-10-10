@@ -25,6 +25,7 @@
 #include <freertos/queue.h>
 
 #include "GroveNFC.h"
+#include "cards_db.h"  // [FORK] ChaosID-style generic dossier for the Reader page (any protocol/backend)
 
 using namespace grove_nfc;
 
@@ -5931,7 +5932,25 @@ void drawScreen(bool popup_only) {
         d.print(emuActionName(static_cast<uint8_t>(idx)));
       }
     } else if (menu_page == MenuPage::Reader) {
-      drawReaderPixelCard(d, 4, content_top + 2, w - 8, content_h - 4, accent, last_card, reader_14b_only);
+      // [FORK] ChaosID-style dossier for whatever card is actually on the
+      // reader - cards_db is keyed only by the protocol code string both
+      // backends (ST25R3916/"Unit NFC" and the WS1850S secondary driver)
+      // already produce, so this works regardless of which chip is active.
+      const int card_area_h = last_card.valid ? (content_h * 3) / 5 : content_h - 4;
+      drawReaderPixelCard(d, 4, content_top + 2, w - 8, card_area_h, accent, last_card, reader_14b_only);
+      if (last_card.valid) {
+        const int dossier_y = content_top + 2 + card_area_h + 2;
+        const int dossier_h = (content_top + 2 + content_h - 4) - dossier_y;
+        d.fillRect(4, dossier_y, w - 8, dossier_h, TFT_BLACK);
+        const CardProfile* p = cardsDbFind(last_card.protocol);
+        String dossier = p
+            ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
+            : String("(sem perfil em cards_db)");
+        d.setFont(&fonts::Font0);
+        d.setTextSize(2);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        drawWrappedText(d, 4, dossier_y, w - 8, 16, 3, 12, dossier, TFT_WHITE, TFT_BLACK);
+      }
     } else if (menu_page == MenuPage::ReadNDEF) {
       String title = "Scanning";
       String body = "";
@@ -6508,7 +6527,28 @@ void drawScreen(bool popup_only) {
   int body_y = 54;
 
   if (menu_page == MenuPage::Reader) {
+#ifdef APP_TARGET_ATOMS3
+    // Square screen is already tight for UID/type alone - skip the dossier
+    // text here rather than risk it overflowing an un-testable layout.
     drawReaderPixelCard(d, 4, 26, w - 8, h - 30, accent, last_card, reader_14b_only);
+#else
+    const int full_h = h - 30;
+    const int card_h2 = last_card.valid ? (full_h * 3) / 5 : full_h;
+    drawReaderPixelCard(d, 4, 26, w - 8, card_h2, accent, last_card, reader_14b_only);
+    if (last_card.valid) {
+      const int dossier_y = 26 + card_h2 + 2;
+      const int dossier_h = (26 + full_h) - dossier_y;
+      d.fillRect(4, dossier_y, w - 8, dossier_h, TFT_BLACK);
+      const CardProfile* p = cardsDbFind(last_card.protocol);
+      String dossier = p
+          ? (String(p->typical_use) + "\n" + String(p->crypto) + "\n" + String(p->attack_vector) + " - " + cardRiskLabel(p->risk))
+          : String("(sem perfil em cards_db)");
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      d.setTextColor(TFT_WHITE, TFT_BLACK);
+      drawWrappedText(d, 4, dossier_y, w - 8, 16, 3, 12, dossier, TFT_WHITE, TFT_BLACK);
+    }
+#endif
   } else if (menu_page == MenuPage::ReadNDEF) {
     d.setFont(&fonts::Font0);
     d.setTextSize(2);
