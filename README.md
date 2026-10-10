@@ -93,13 +93,27 @@ pio run -e emv-test -t upload -t monitor
 
 ## UI e controle de botões
 
-Botão principal: `BtnA` (StickS3/AtomS3/CardPuter), `BtnB` (M5Paper, via touch).
+A regra geral é a mesma em todo board: **clique** avança/confirma a ação mais comum da tela atual (trocar card na home, forçar leitura, avançar item), e **hold** (segurar o botão por um tempo que varia por board — ver tabela) entra na funcionalidade ou volta pra Home, dependendo da tela.
 
-- **Home**: clique troca de card (`Diagnose → Reader → Read NDEF → Emulator`); hold (~380ms StickS3, varia por board) entra na funcionalidade.
+| Board | Botão "clique" | Botão "hold" | Threshold do hold | Botão secundário |
+|---|---|---|---|---|
+| AtomS3 | `BtnA` | `BtnA` (mesmo botão) | 700ms | nenhum — só tem 1 botão físico |
+| M5StickS3 | `BtnA` | `BtnA` | 380ms | `BtnPWR` **ou** `BtnB` (qualquer um dos dois) — tap = `key_b` (equivale a "anterior"), hold = voltar/cancelar |
+| M5StickC Plus (1.1 / Plus2) | `BtnA` | `BtnA` | 700ms | `BtnB` — tap = `key_b`, hold = voltar/cancelar |
+| CardPuter / CardPuter ADV | teclado | tecla `b`/`B` | 320ms (hold da tecla `b`) | setas ou `W`/`A`/`H`/`I`/`K`/`;`/`,` (anterior), `S`/`D`/`J`/`L`/`.`/`/` (próximo), `Enter` confirma, `ESC`/`Del` volta |
+| M5Paper | `BtnB` (ou toque) | `BtnB` | 500ms | `BtnC` — clique = anterior, hold = voltar/cancelar; `BtnA` = próximo |
+
+Notas:
+
+- No StickS3/StickC Plus, o botão secundário só tem *tap* e *hold* — não existe um "clique" equivalente ao botão principal (ele dispara `nav_prev`/"voltar", não "próximo").
+- No AtomS3, por ter só um botão físico, a mesma tecla serve pra avançar (clique) e confirmar/voltar (hold) — o firmware decide qual ação cabe ao hold de acordo com a tela atual.
+- No M5Paper, tocar direto num card da home também funciona, além dos botões físicos.
+
+Dentro de cada tela:
+
+- **Home**: clique troca de card (`Diagnose → Reader → Read NDEF → Emulator` → ...); hold entra na funcionalidade.
 - **Reader / Read NDEF**: clique força leitura imediata; hold volta pra Home.
 - **Emulator**: clique avança item/ação; hold confirma.
-- **CardPuter**: setas (ou `WASD`/`HJKL`) navegam, `Enter` confirma, `ESC`/`Del` volta.
-- **M5Paper**: toque direto nos cards da home; botão C volta, botão B confirma, botão A avança.
 
 Feedback visual: uma barra fina no rodapé da tela enche durante o hold, proporcional ao tempo até a ação disparar (não disponível no M5Paper — e-ink é lento demais pra overlay por tick).
 

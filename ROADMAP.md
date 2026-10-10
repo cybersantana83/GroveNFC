@@ -64,9 +64,11 @@ limpo, e leitura real confirmada (`MFC 1K`, UID `AD2A19D4`).
       teclado, confirm, ou hold em andamento) e só tomando o caminho rápido
       "só anima, nada pra tratar" quando não há nada pendente — caso
       contrário o fluxo cai pro tratamento normal de navegação da home.
-- [ ] Documentar no README o mapeamento real de botões por board
-      (ex: StickS3 usa `BtnA` pra próximo/confirmar e `BtnPWR`/`BtnB`
-      pra voltar — isso hoje não está escrito em lugar nenhum).
+- [x] Documentar no README o mapeamento real de botões por board — tabela
+      com botão de clique/hold, threshold do hold (320-700ms, varia por
+      board) e botão secundário de cada um, lida direto do código
+      (`mainButtonClicked()`/`readKeyNavState()`/`kHoldPressMs`), não
+      inventada de memória.
 
 ## Fase 1.5 — Suporte a múltiplos chips NFC (achado durante debug do StickS3)
 
@@ -238,7 +240,7 @@ aplicação em vez de por chip.
         ver detalhes na Fase 1.
       - [x] Não descartar cliques na janela de animação de transição
         (~240ms) — ver detalhes na Fase 1.
-      - [ ] Documentar no README o mapeamento real de botões por board.
+      - [x] Documentar no README o mapeamento real de botões por board.
 
 ## Fase 3 — Migração gradual
 
