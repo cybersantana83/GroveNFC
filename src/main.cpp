@@ -116,7 +116,7 @@ constexpr size_t kIso15DumpMaxBytes = 256;
 constexpr uint8_t kEmuDumpMenuBaseItems = 3;  // Load Dump + Exit + Scan & Clone
 constexpr uint32_t kDumpEmuPopupMs = 1700;
 constexpr const char* kEmuDumpDir = "/dumps";
-constexpr const char* kEmuApSsid = "GroveNFC-Dump";
+constexpr const char* kEmuApSsid = "ChaosNFC-Dump";
 constexpr const char* kEmuApPass = "";
 constexpr const char* kEmuDumpPrefNs = "emu_dump";
 #if defined(APP_TARGET_CARDPUTER) || defined(APP_TARGET_CARDPUTER_ADV)
@@ -217,9 +217,9 @@ static void drawM5PaperStatusBar() {
   g_canvas.setTextSize(2);
   const int text_y = (bar_h - g_canvas.fontHeight()) / 2;
   g_canvas.setCursor(12, text_y);
-  g_canvas.print(in_home ? "GroveNFC" : "< Back");
+  g_canvas.print(in_home ? "Chaos NFC" : "< Back");
   if (!in_home) {
-    const String brand = "GroveNFC";
+    const String brand = "Chaos NFC";
     const int brand_w = g_canvas.textWidth(brand);
     g_canvas.setCursor((w - brand_w) / 2, text_y);
     g_canvas.print(brand);
@@ -3024,8 +3024,8 @@ bool startEmuApPortal() {
       refreshDumpFiles(false);
       String html =
         "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>GroveNFC Dump Library</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,monospace;margin:0;padding:14px;background:#101214;color:#eee}main{max-width:1240px;margin:0 auto}a{color:#68d8ff;text-decoration:none}button{margin:4px;padding:7px 12px;background:#1f8a70;color:#fff;border:0;border-radius:4px}input,textarea,select{background:#181c20;color:#eee;border:1px solid #38424a;border-radius:4px;padding:7px}table{border-collapse:collapse;width:100%;min-width:680px}td,th{border-bottom:1px solid #30363d;padding:7px;text-align:left;white-space:nowrap}.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}.muted{color:#aab}.pill{display:inline-block;padding:2px 7px;border:1px solid #446;border-radius:999px;color:#cde}.actions a{margin-right:10px}.meta{font-size:12px;color:#9fb}.filebtn{cursor:pointer;display:inline-block;padding:7px 14px;background:#1a2d40;color:#68d8ff;border:1px solid #2a4a6a;border-radius:4px;vertical-align:middle;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.up-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}.up-row>*{margin:0}@media (max-width:768px){body{padding:10px}button{padding:7px 10px}td,th{padding:6px;font-size:12px}.filebtn{max-width:100%;width:100%;box-sizing:border-box}.up-row{flex-direction:column;align-items:stretch}.up-row select,.up-row button{width:100%;box-sizing:border-box}}</style></head>"
-        "<body><main><h2>GroveNFC Dump Library</h2>"
+        "<title>Chaos NFC Dump Library</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,monospace;margin:0;padding:14px;background:#101214;color:#eee}main{max-width:1240px;margin:0 auto}a{color:#68d8ff;text-decoration:none}button{margin:4px;padding:7px 12px;background:#1f8a70;color:#fff;border:0;border-radius:4px}input,textarea,select{background:#181c20;color:#eee;border:1px solid #38424a;border-radius:4px;padding:7px}table{border-collapse:collapse;width:100%;min-width:680px}td,th{border-bottom:1px solid #30363d;padding:7px;text-align:left;white-space:nowrap}.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}.muted{color:#aab}.pill{display:inline-block;padding:2px 7px;border:1px solid #446;border-radius:999px;color:#cde}.actions a{margin-right:10px}.meta{font-size:12px;color:#9fb}.filebtn{cursor:pointer;display:inline-block;padding:7px 14px;background:#1a2d40;color:#68d8ff;border:1px solid #2a4a6a;border-radius:4px;vertical-align:middle;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.up-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}.up-row>*{margin:0}@media (max-width:768px){body{padding:10px}button{padding:7px 10px}td,th{padding:6px;font-size:12px}.filebtn{max-width:100%;width:100%;box-sizing:border-box}.up-row{flex-direction:column;align-items:stretch}.up-row select,.up-row button{width:100%;box-sizing:border-box}}</style></head>"
+        "<body><main><h2>Chaos NFC Dump Library</h2>"
         "<p class='muted'>Manage dumps from web. PM3 JSON and BIN imports are normalized into GroveNFC managed JSON (name/type/source/UID/SAK/ATQA/blocks).</p>"
         "<form method='POST' action='/upload' enctype='multipart/form-data'>"
         "<div class='up-row'>"
@@ -3240,7 +3240,7 @@ bool startEmuApPortal() {
 
     emu_ap_server.onNotFound([]() {
       emu_ap_server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
-      emu_ap_server.send(302, "text/plain", "GroveNFC Dumps");
+      emu_ap_server.send(302, "text/plain", "Chaos NFC Dumps");
     });
 
     routes_ready = true;
@@ -4151,7 +4151,7 @@ void drawDumpsPage(lgfx::v1::LGFXBase& d, int x, int y, int w, int h, uint16_t a
 
   if (emu_dump_count == 0 && !dumps_pick_for_emu) {
     d.setTextSize(2);
-    drawWrappedText(d, x + 2, y + 12, w - 4, 18, max(2, (h - 12) / 18), 12, "No dumps. Connect GroveNFC-Dump and upload json/bin.", TFT_WHITE, TFT_BLACK);
+    drawWrappedText(d, x + 2, y + 12, w - 4, 18, max(2, (h - 12) / 18), 12, "No dumps. Connect ChaosNFC-Dump and upload json/bin.", TFT_WHITE, TFT_BLACK);
     d.setTextSize(1);
     return;
   }
@@ -5013,7 +5013,7 @@ static void drawM5PaperReaderPage() {
     g_canvas.setCursor(card_x + (card_w - g_canvas.textWidth(waiting)) / 2, card_y + 180);
     g_canvas.print(waiting);
     g_canvas.setTextSize(2);
-    const String hint = "Place a card near GroveNFC";
+    const String hint = "Place a card near Chaos NFC";
     g_canvas.setCursor(card_x + (card_w - g_canvas.textWidth(hint)) / 2, card_y + 250);
     g_canvas.print(hint);
     g_canvas.setTextSize(2);
@@ -5391,7 +5391,7 @@ static void drawM5PaperDumpPreviewPage() {
 static void drawM5PaperAboutPage() {
   const int w = g_canvas.width();
   g_canvas.fillScreen(TFT_WHITE);
-  drawM5PaperPageTitle("ABOUT", "GROVENFC TOUCH REFERENCE DEVICE");
+  drawM5PaperPageTitle("ABOUT", "CHAOS NFC TOUCH REFERENCE DEVICE");
   g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
   g_canvas.setTextSize(2);
   g_canvas.setCursor(28, 190);
@@ -5574,137 +5574,53 @@ void drawScreen(bool popup_only) {
       d.setCursor((w - brand_w) / 2, 4);
       d.print(brand_s3);
 
-      const int icon_cy = content_top + content_h / 2;
+      // [FORK] List-mode home: every page (Reader/EMV/FIDO2/Emulator/Dumps/
+      // About) shown at once as a scrollable vertical list instead of one
+      // big centered icon with a slide animation - click still moves
+      // home_index up/down the same kHomeOrder[]/kHomeOrderNfcUnit[] list as
+      // before (see the input handler below, untouched), hold still calls
+      // enterCurrentFeature(); only the drawing changed. Reuses the same
+      // bordered-box/highlighted-row look as the Emulator "Load Dump" menu
+      // above, for visual consistency.
+      const int list_count = homePageCount();
+      d.setFont(&fonts::Font0);
+      d.setTextSize(2);
+      const int text_h = d.fontHeight();
+      const int row_h = max(18, text_h + 8);
+      // Leave room at the top of content_h for boot_notice_line (drawn at
+      // content_top+2 below) so a long first page in the list can't be
+      // overdrawn by/overdraw it.
+      const int list_top_pad = 12;
+      const int avail_h = max(row_h, content_h - list_top_pad);
+      const int visible_count = min(list_count, max(1, avail_h / row_h));
+      const int box_w = w - 16;
+      const int box_h = visible_count * row_h + 8;
+      const int box_x = (w - box_w) / 2;
+      const int box_y = content_top + list_top_pad + max(0, (avail_h - box_h) / 2);
+      drawMenuBox(box_x, box_y, box_w, box_h);
 
-      const int icon_box_cx = w / 2;
-      const int icon_box_w = 60;
-      const int icon_box_h = 44;
-      const int icon_box_x = icon_box_cx - icon_box_w / 2;
-      const int icon_box_y = icon_cy - icon_box_h / 2;
+      const int max_scroll = max(0, list_count - visible_count);
+      const int scroll_start = min(max(0, home_index - visible_count / 2), max_scroll);
+      const int row_w = box_w - 8;
+      const int row_x = box_x + 4;
 
-      // Arrows with flash feedback
-      auto drawArrow = [&](bool left, uint16_t col) {
-        if (left) {
-          d.fillRect(8, icon_cy - 2, 4, 4, col);
-          d.fillRect(12, icon_cy - 6, 4, 12, col);
-          d.fillRect(16, icon_cy - 10, 4, 20, col);
+      for (int i = 0; i < visible_count; ++i) {
+        const int idx = scroll_start + i;
+        if (idx >= list_count) break;
+        const bool selected = (idx == home_index);
+        const int row_y = box_y + 4 + i * row_h;
+        if (selected) {
+          d.fillRect(row_x, row_y, row_w, row_h - 1, accent);
+          d.setTextColor(TFT_BLACK, accent);
         } else {
-          d.fillRect(w - 12, icon_cy - 2, 4, 4, col);
-          d.fillRect(w - 16, icon_cy - 6, 4, 12, col);
-          d.fillRect(w - 20, icon_cy - 10, 4, 20, col);
+          d.setTextColor(TFT_WHITE, TFT_BLACK);
         }
-      };
-      const uint32_t now_ms = millis();
-      drawArrow(true,  accent);
-      drawArrow(false, accent);
-      const bool flash_right_ok = home_arrow_flash_right && now_ms < home_arrow_flash_until_ms;
-      const bool flash_left_ok  = home_arrow_flash_left  && now_ms < home_arrow_flash_until_ms;
-      if (flash_right_ok) {
-        drawArrow(false, TFT_BLACK);  // hide right arrow
-      } else if (flash_left_ok) {
-        drawArrow(true,  TFT_BLACK);  // hide left arrow
-      } else {
-        home_arrow_flash_right = false;
-        home_arrow_flash_left = false;
-      }
-
-      if (home_anim_active) {
-        const uint32_t now = millis();
-        const uint32_t elapsed = now - home_anim_start_ms;
-        float t = 1.0f;
-        if (elapsed < home_anim_duration_ms) {
-          t = static_cast<float>(elapsed) / static_cast<float>(home_anim_duration_ms);
-        } else {
-          home_anim_active = false;
-        }
-        const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
-        const float travel = 1.0f - eased; // 1→0, how far from center
-
-        // ---- Icon: slide + alpha fade ----
-        // Next (dir=1): from (current) slides LEFT out; to (new) slides in from RIGHT
-        // Prev (dir=-1): from slides RIGHT out; to slides in from LEFT
-        // Alpha curves differ: from fades out faster, to fades in with delay
-        // so they don't appear simultaneously at mid-animation.
-        const int travel_px = static_cast<int>(travel * icon_box_cx);
-        const int from_cx = icon_box_cx - static_cast<int>(eased * icon_box_cx) * home_anim_dir;
-        const int to_cx   = icon_box_cx + travel_px * home_anim_dir;
-
-        d.fillRect(0, icon_box_y, w, icon_box_h, TFT_BLACK);
-
-        // "From" icon: slides away, fades out (fast — gone by eased=0.5)
-        {
-          const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
-          if (a > 4) {
-            drawHomeIconForPage(d, from_cx, icon_cy, home_anim_from, scaleColor565(accent, a));
-          }
-        }
-
-        // "To" icon: slides in, fades in (early — starts at eased=0.10)
-        {
-          const float reveal = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
-          const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal * 255.0f)));
-          if (a > 4) {
-            drawHomeIconForPage(d, to_cx, icon_cy, home_anim_to, scaleColor565(accent, a));
-          }
-        }
-
-        // ---- Text: staggered slide + alpha fade ----
-        // Text slides same speed as icon but fades in much later,
-        // creating a "follow behind" feel without a position jump.
-        const float text_eased = max(0.0f, min(1.0f, (eased - 0.10f) / 0.90f));
-        const float text_travel = 1.0f - text_eased;
-
-        const int from_tx = icon_box_cx - static_cast<int>(eased * icon_box_cx) * home_anim_dir;
-        const int to_tx   = icon_box_cx + static_cast<int>(text_travel * icon_box_cx) * home_anim_dir;
-
-        const String name_from = String(homePageName(home_anim_from));
-        const String name_to = String(homePageName(home_anim_to));
-        d.setFont(&fonts::Font0);
-        d.setTextSize(2);
-        const int name_y = h - 20;
-
-        // Show only one label at a time. The old label owns the first half of
-        // the slide and the new label owns the second half, preventing two
-        // identical names from being visible during a wrap-around transition.
-        {
-          const uint8_t a = static_cast<uint8_t>(max(0, 255 - static_cast<int>(min(1.0f, eased * 2.0f) * 255.0f)));
-          if (eased < 0.5f && a > 4) {
-            const int nw = d.textWidth(name_from);
-            d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
-            d.setCursor(from_tx - nw / 2, name_y);
-            d.print(name_from);
-          }
-        }
-
-        // "To" text: slide + fade in during the second half only.
-        {
-          const float reveal_t = max(0.0f, min(1.0f, (eased - 0.5f) * 2.0f));
-          const uint8_t a = static_cast<uint8_t>(max(0, static_cast<int>(reveal_t * 255.0f)));
-          if (eased >= 0.5f && a > 4) {
-            const int nw = d.textWidth(name_to);
-            d.setTextColor(scaleColor565(accent, a), TFT_BLACK);
-            d.setCursor(to_tx - nw / 2, name_y);
-            d.print(name_to);
-          }
-        }
-      } else {
-        // Static home page — no animation
-        d.fillRect(icon_box_x, icon_box_y, icon_box_w, icon_box_h, TFT_BLACK);
-        drawHomeIconForPage(d, icon_box_cx, icon_cy, menu_page, accent);
-
-        d.setTextColor(accent, TFT_BLACK);
-        const String& home_name = homePageName(menu_page);
-        d.setTextSize(2);
-        const int hw = d.textWidth(home_name);
-        d.setCursor((w - hw) / 2, h - 20);
-        d.print(home_name);
+        const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
+        d.setCursor(row_x + 6, text_y);
+        d.print(homePageName(homePageAt(idx)));
       }
 
       if (!boot_notice_line.isEmpty()) {
-        // [FORK] Was pinned at h-24, which collided with the page-name label
-        // drawn at h-20 (same size2 text, overlapping baselines). There's a
-        // clear gap between the brand text (y=4..20) and the icon box (which
-        // starts well into content_h), so draw it there instead.
         d.setTextSize(1);
         d.setTextColor(TFT_RED, TFT_BLACK);
         d.setCursor(4, content_top + 2);
@@ -6145,7 +6061,7 @@ void drawScreen(bool popup_only) {
     hd.setTextSize(2);
     hd.setTextColor(TFT_BLACK, TFT_WHITE);
     hd.setCursor(4, 5);
-    hd.print("GroveNFC");
+    hd.print("Chaos NFC");
     hd.setTextSize(1);
     const String module_port = displayModuleName(nfc_module_name) + " " + nfc_port_name;
     hd.setCursor(screen_w - hd.textWidth(module_port) - 4, 8);
@@ -6383,7 +6299,7 @@ void drawScreen(bool popup_only) {
     body_line = emu_dump_status;
   } else if (menu_page == MenuPage::About) {
     sub_title_line = "About";
-    title_line = "GroveNFC";
+    title_line = "Chaos NFC";
   } else {
     sub_title_line = "Diagnose";
     title_line = diagnose_ok ? "DIAG PASS" : "DIAG CHECK";
@@ -9140,7 +9056,7 @@ void setup() {
   g_canvas.setTextSize(2);
   g_canvas.setTextColor(TFT_BLACK, TFT_WHITE);
   g_canvas.setCursor(4, 5);
-  g_canvas.print("GroveNFC");
+  g_canvas.print("Chaos NFC");
   g_canvas.drawLine(0, kStatusBarHeight, sw, kStatusBarHeight, TFT_BLACK);
   // Tiles
   for (int i = 0; i < homePageCount(); ++i) {
