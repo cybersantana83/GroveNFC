@@ -25,23 +25,12 @@ constexpr uint16_t I2cMiscReg_SetTxLastBit_Addr = 0x0021;
 constexpr uint16_t I2cMiscReg_SetThru_Addr = 0x0022;
 constexpr uint16_t I2cMiscReg_SetEGT_Addr = 0x0023;
 constexpr uint16_t I2cMiscReg_SetSlot_Addr = 0x0024;
-constexpr uint16_t I2cMiscReg_SetEpWrite_Addr = 0x0029;
 
 constexpr uint16_t I2cDataReg_Addr = 0x0100;
-constexpr uint16_t I2cEpromReg_Addr = 0x1000;
 
 constexpr uint16_t SYS_REG_MODE_DEFAULT = 0x0000;
 constexpr uint16_t SYS_REG_MODE_READER = 0x0100;
-constexpr uint16_t SYS_REG_MODE_TAG = 0x0200;
 constexpr uint16_t SYS_REG_MODE_TAG_NONE = 0x0000;
-constexpr uint16_t SYS_REG_MODE_TAG_NTAG213 = 0x0001;
-constexpr uint16_t SYS_REG_MODE_TAG_NTAG215 = 0x0002;
-constexpr uint16_t SYS_REG_MODE_TAG_NTAG216 = 0x0003;
-constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B1K = 0x0004;
-constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_4B4K = 0x0006;
-constexpr uint16_t SYS_REG_MODE_TAG_MIFARE1_7B4K = 0x0007;
-constexpr uint16_t SYS_REG_MODE_TAGIT_HF_I_Plus = 0x000C;
-constexpr uint16_t SYS_REG_MODE_TAG_CHINA_II = 0x0020;
 
 constexpr uint16_t SYS_REG_RFCONFIG_READER_ISO14A_106K = 0x0100;
 constexpr uint16_t SYS_REG_RFCONFIG_READER_ISO14B_106K = 0x0500;
@@ -77,7 +66,6 @@ constexpr uint8_t MISC_REG_TXLASTBIT_7 = 0x07;
 constexpr uint8_t MISC_REG_THRU_DISABLE = 0x00;
 constexpr uint8_t MISC_REG_EGT_6 = 0x06;
 constexpr uint8_t MISC_REG_SLOT_0 = 0x00;
-constexpr uint8_t MISC_REG_EPWRITE_WRITE = 0x01;
 
 struct CardInfo {
   String protocol;
@@ -110,36 +98,11 @@ class GroveNFC {
   void stopRF();
   bool recover();
   bool setSlot(uint8_t slot);
-  bool startEmulationMifare1K();
-  bool startEmulationMifare4K();
-  bool startEmulationNtag213();
-  bool startEmulationNtag215();
-  bool startEmulationNtag216();
-  bool startEmulationChinaII();
-  bool startEmulationFelica();
-  bool startEmulationISO15();
-  bool startNfcUnitEmulation(bool use_ntag213);
-  bool startNfcUnitEmulationNtag(uint16_t ntag_type);  // 213, 215, 216
-  bool loadMifare1KDump(const uint8_t* data, size_t len);
-  bool autoStartMifare1K();
-  bool startNfcUnitEmulationMifare1K();
-  bool startNfcUnitEmulationMifare4K();
-  bool startNfcUnitEmulationFelica();
   void stopNfcUnitEmulation();
   bool isNfcUnitEmulating() const;
-  void tickNfcUnitEmulation();
   bool readAny(CardInfo& card);
   bool readOnlyISO14B(CardInfo& card);
   bool readNdef(String& ndef_text, String& detail);
-  bool uploadEmulationDump(DumpTagType type, const uint8_t* data, size_t len);
-  // [FORK] Full-memory read of an NTAG213/215/216 tag for the "clone and
-  // emulate now" flow - see main.cpp's quickCloneAndEmulate(). Does its own
-  // select + GET_VERSION detection (doesn't rely on a prior readAny()'s
-  // selection still being live), then loops type2ReadBlock() to fill the
-  // whole dump. card.protocol is set to "NTAG213"/"NTAG215"/"NTAG216" on
-  // success; fails (returns false) for any other tag type, including plain
-  // Ultralight/NTAG203, which this doesn't attempt to size/clone.
-  bool readNtagFullDump(CardInfo& card, uint8_t* dump, size_t dump_capacity, size_t& dump_len);
   const char* deviceName() const;
   uint8_t activeAddress() const { return i2c_addr_; }
 
@@ -161,17 +124,8 @@ class GroveNFC {
   bool writeData(uint16_t reg, const uint8_t* data, uint16_t len);
   bool readData(uint16_t reg, uint8_t* data, uint16_t len);
   bool txrx(const uint8_t* cmd, uint8_t cmd_len, uint8_t* out, uint16_t& out_len, uint16_t wait_ms = 15);
-  bool writeEepromImage(uint16_t tag_addr, const uint8_t* data, size_t len);
-  void clearCustomDumpFlags();
 
   String bytesToHex(const uint8_t* data, size_t len, bool reverse = false);
-  bool writeMifare1KImage();
-  bool writeMifare4KImage();
-  void writeNtag213Image();
-  void writeNtag215Image();
-  void writeNtag216Image();
-  void writeChinaIIImage();
-  void writeISO15Image();
 
   struct NfcUnitBridge;
   bool beginNfcUnitBackend();
@@ -183,14 +137,6 @@ class GroveNFC {
   NfcUnitBridge* nfc_unit_bridge_ = nullptr;
 
   uint8_t slot_index_ = 0;
-  bool custom_dump_mifare1k_ = false;
-  bool custom_dump_mifare4k_ = false;
-  bool custom_dump_ntag213_ = false;
-  bool custom_dump_ntag215_ = false;
-  bool custom_dump_ntag216_ = false;
-  bool custom_dump_iso15_ = false;
-  bool custom_dump_iso14b_ = false;
-  bool custom_dump_felica_ = false;
 };
 
 }  // namespace grove_nfc
