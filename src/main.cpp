@@ -845,6 +845,20 @@ const char* homePageName(MenuPage page) {
   }
 }
 
+// [FORK] Display-only label override for the StickS3/StickCPlus list-mode
+// home (see the "if (in_home)" list render in drawScreen() below) -
+// "Reader" is renamed to "Mifare and Others" there since that page is the
+// generic reader for every non-EMV/FIDO2 card type (MIFARE Classic, NTAG/
+// Ultralight, ISO14443B, FeliCa, ISO15693...), and every label gets
+// upper-cased to match the list's look. homePageName() itself stays
+// untouched - other boards' home grids/animations (M5Paper) call it
+// directly and are unaffected.
+String stickS3HomeLabel(MenuPage page) {
+  String label = (page == MenuPage::Reader) ? String("Mifare and Others") : String(homePageName(page));
+  label.toUpperCase();
+  return label;
+}
+
 // Forward declarations for home icon drawers (defined later in drawScreen section)
 void drawHomeIconReader(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent);
 void drawHomeIconEmulator(lgfx::v1::LGFXBase& d, int cx, int cy, uint16_t accent);
@@ -5604,6 +5618,12 @@ void drawScreen(bool popup_only) {
       const int row_w = box_w - 8;
       const int row_x = box_x + 4;
 
+      // [FORK] Small charm touch on the selected row: a chevron that drifts
+      // side to side on the right edge, hinting "hold to enter" without any
+      // text. Purely decorative - home_index/selection logic is untouched.
+      const float chevron_wave = (sinf(static_cast<float>(millis()) / 220.0f) + 1.0f) / 2.0f;  // 0..1
+      const int chevron_dx = static_cast<int>(chevron_wave * 4.0f);  // 0..4px drift
+
       for (int i = 0; i < visible_count; ++i) {
         const int idx = scroll_start + i;
         if (idx >= list_count) break;
@@ -5617,7 +5637,13 @@ void drawScreen(bool popup_only) {
         }
         const int text_y = row_y + max(0, ((row_h - 1) - text_h) / 2);
         d.setCursor(row_x + 6, text_y);
-        d.print(homePageName(homePageAt(idx)));
+        d.print(stickS3HomeLabel(homePageAt(idx)));
+
+        if (selected) {
+          const int cx = row_x + row_w - 14 + chevron_dx;
+          const int cy = row_y + (row_h - 1) / 2;
+          d.fillTriangle(cx, cy - 5, cx, cy + 5, cx + 5, cy, TFT_BLACK);
+        }
       }
 
       if (!boot_notice_line.isEmpty()) {
